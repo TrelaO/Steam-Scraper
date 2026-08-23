@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# Project data (research artifacts in generated_etl/ ARE tracked)
+backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
+backend/landing/*
+!backend/landing/.gitkeep
