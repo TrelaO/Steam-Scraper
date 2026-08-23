@@ -1,10 +1,13 @@
+import os
 import uuid
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -13,8 +16,12 @@ from .format_detector import detect_format  # noqa: E402
 from .models import ETLJobStatus, UploadResponse  # noqa: E402
 
 APP_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = APP_ROOT.parent
 LANDING_DIR = APP_ROOT / "landing"
 GENERATED_ETL_DIR = APP_ROOT / "generated_etl"
+# In Docker the built frontend is copied to /app/frontend_dist (see Dockerfile); locally
+# (no env var set) it defaults to the sibling frontend/dist produced by `npm run build`.
+FRONTEND_DIST = Path(os.getenv("FRONTEND_DIST_PATH", str(REPO_ROOT / "frontend" / "dist")))
 LANDING_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_ETL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -29,13 +36,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+api = APIRouter(prefix="/api")
+
 # In-memory registries. Fine for a single-process demo/research app; would move to the
 # database or a task queue for anything long-lived or multi-worker.
 _files: dict[str, dict] = {}
 _jobs: dict[str, ETLJobStatus] = {}
 
 
-@app.post("/upload", response_model=UploadResponse)
+@api.post("/upload", response_model=UploadResponse)
 async def upload(file: UploadFile):
     content = await file.read()
     fmt = detect_format(file.filename, content)
@@ -56,7 +65,7 @@ def _load_dataframe(path: Path, fmt: str) -> pd.DataFrame:
     raise HTTPException(400, f"Unsupported format: {fmt}")
 
 
-@app.post("/etl/run/{file_id}", response_model=ETLJobStatus)
+@api.post("/etl/run/{file_id}", response_model=ETLJobStatus)
 def run_etl(file_id: str):
     meta = _files.get(file_id)
     if meta is None:
@@ -99,7 +108,7 @@ def run_etl(file_id: str):
     return status
 
 
-@app.get("/etl/status/{job_id}", response_model=ETLJobStatus)
+@api.get("/etl/status/{job_id}", response_model=ETLJobStatus)
 def etl_status(job_id: str):
     job = _jobs.get(job_id)
     if job is None:
@@ -107,7 +116,7 @@ def etl_status(job_id: str):
     return job
 
 
-@app.get("/analytics/price-discount-by-genre-year")
+@api.get("/analytics/price-discount-by-genre-year")
 def analytics_price_discount_by_genre_year():
     conn = db.get_connection()
     try:
@@ -116,7 +125,7 @@ def analytics_price_discount_by_genre_year():
         conn.close()
 
 
-@app.get("/analytics/price-review-correlation")
+@api.get("/analytics/price-review-correlation")
 def analytics_price_review_correlation():
     conn = db.get_connection()
     try:
@@ -125,10 +134,29 @@ def analytics_price_review_correlation():
         conn.close()
 
 
-@app.get("/analytics/price-variance-by-platform")
+@api.get("/analytics/price-variance-by-platform")
 def analytics_price_variance_by_platform():
     conn = db.get_connection()
     try:
         return analytics_queries.price_variance_by_platform(conn)
     finally:
         conn.close()
+
+
+app.include_router(api)
+
+# Serve the built frontend (npm run build -> frontend/dist) as static files, so the
+# whole app is reachable from a single origin/port. Only active when a build exists;
+# in local dev without a build, only the /api/* routes above are served (run the
+# Vite dev server separately on :5173, which proxies /api to this backend).
+if FRONTEND_DIST.is_dir():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        candidate = FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")

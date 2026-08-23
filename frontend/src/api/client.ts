@@ -1,4 +1,6 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+// Relative by default: same-origin in production (FastAPI serves the built frontend and
+// /api together) and proxied to the backend by the Vite dev server (see vite.config.ts).
+const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
 export interface UploadResponse {
   file_id: string;
