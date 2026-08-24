@@ -11,6 +11,7 @@ export default function Upload() {
   async function handleFile(file: File) {
     setError(null);
     setBusy(true);
+    setUploaded(null);
     try {
       const res = await uploadFile(file);
       setUploaded(res);
@@ -36,26 +37,38 @@ export default function Upload() {
   }
 
   return (
-    <div>
-      <h1>Upload source data</h1>
-      <p>Accepts the same Steam dataset in CSV, JSON, or XLSX form.</p>
-      <input
-        type="file"
-        accept=".csv,.json,.xlsx"
-        disabled={busy}
-        onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-      />
-      {uploaded && (
-        <div style={{ marginTop: 16 }}>
-          <p>
-            {uploaded.filename} detected as <strong>{uploaded.detected_format}</strong>
-          </p>
-          <button onClick={handleRun} disabled={busy}>
-            {busy ? "Running..." : "Generate & run ETL"}
-          </button>
-        </div>
-      )}
-      {error && <p style={{ color: "red" }}>{error}</p>}
+    <div className="page">
+      <div className="page-header">
+        <h1>Upload source data</h1>
+        <p>Accepts the same Steam dataset in CSV, JSON, or XLSX form.</p>
+      </div>
+
+      <div className="card">
+        <label className={`dropzone${busy ? " disabled" : ""}`}>
+          <span className="dropzone-title">
+            {busy ? "Working..." : "Click to choose a file"}
+          </span>
+          <span className="dropzone-hint">.csv, .json, or .xlsx</span>
+          <input
+            type="file"
+            accept=".csv,.json,.xlsx"
+            disabled={busy}
+            onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+          />
+        </label>
+
+        {uploaded && (
+          <div className="file-summary">
+            <span className="file-summary-name">{uploaded.filename}</span>
+            <span className="badge badge-neutral">{uploaded.detected_format}</span>
+            <button className="btn" onClick={handleRun} disabled={busy}>
+              {busy ? "Running..." : "Generate & run ETL"}
+            </button>
+          </div>
+        )}
+
+        {error && <div className="error-box">{error}</div>}
+      </div>
     </div>
   );
 }

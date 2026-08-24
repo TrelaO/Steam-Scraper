@@ -72,7 +72,10 @@ def get_ddl_text() -> str:
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # check_same_thread=False: the connection is opened on the request thread but the
+    # generated ETL code runs it from a worker thread (etl_runner's timeout executor).
+    # Access is still strictly sequential (never concurrent), so this is safe here.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
@@ -110,6 +113,25 @@ def _seed_dim_platform(conn: sqlite3.Connection) -> None:
         """,
         combos,
     )
+
+
+def clear_data() -> None:
+    """Wipes everything the ETL writes (dim_game, dim_genre, bridge_game_genre,
+    fact_game) but leaves the seeded reference dimensions (dim_date, dim_platform)
+    in place - those aren't user data, they're static lookup tables."""
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute("DELETE FROM fact_game")
+            conn.execute("DELETE FROM bridge_game_genre")
+            conn.execute("DELETE FROM dim_genre")
+            conn.execute("DELETE FROM dim_game")
+            conn.execute(
+                "DELETE FROM sqlite_sequence WHERE name IN "
+                "('fact_game', 'dim_genre', 'dim_game')"
+            )
+    finally:
+        conn.close()
 
 
 def _seed_dim_date(conn: sqlite3.Connection, start_year: int = 2015, end_year: int = 2030) -> None:

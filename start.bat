@@ -3,7 +3,7 @@ setlocal
 
 cd /d "%~dp0"
 
-echo Starting Steam AI-ETL (first run can take a few minutes to build)...
+echo Starting Steam Scraper (first run can take a few minutes to build)...
 docker compose up -d --build
 if errorlevel 1 (
     echo.

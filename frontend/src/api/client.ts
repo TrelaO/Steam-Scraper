@@ -25,6 +25,21 @@ export interface ETLJobStatus {
   error?: string;
 }
 
+export interface GameRow {
+  app_id: string;
+  game_name: string | null;
+  release_date: string | null;
+  platform_combo: string | null;
+  price_usd: number | null;
+  discount_pct: number | null;
+  peak_ccu: number | null;
+  positive_reviews: number | null;
+  negative_reviews: number | null;
+  average_playtime_mins: number | null;
+  snapshot_date: string | null;
+  genres: string | null;
+}
+
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
@@ -36,17 +51,21 @@ async function handle<T>(res: Response): Promise<T> {
 export function uploadFile(file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
-  return fetch(`${API_BASE}/upload`, { method: "POST", body: form }).then(handle);
+  return fetch(`${API_BASE}/upload`, { method: "POST", body: form }).then(handle<UploadResponse>);
 }
 
 export function runEtl(fileId: string): Promise<ETLJobStatus> {
-  return fetch(`${API_BASE}/etl/run/${fileId}`, { method: "POST" }).then(handle);
+  return fetch(`${API_BASE}/etl/run/${fileId}`, { method: "POST" }).then(handle<ETLJobStatus>);
 }
 
 export function getEtlStatus(jobId: string): Promise<ETLJobStatus> {
-  return fetch(`${API_BASE}/etl/status/${jobId}`).then(handle);
+  return fetch(`${API_BASE}/etl/status/${jobId}`).then(handle<ETLJobStatus>);
 }
 
-export function getAnalytics<T>(path: string): Promise<T> {
-  return fetch(`${API_BASE}/analytics/${path}`).then(handle);
+export function listGames(): Promise<GameRow[]> {
+  return fetch(`${API_BASE}/games`).then(handle<GameRow[]>);
+}
+
+export function clearWarehouse(): Promise<{ status: string }> {
+  return fetch(`${API_BASE}/warehouse`, { method: "DELETE" }).then(handle<{ status: string }>);
 }

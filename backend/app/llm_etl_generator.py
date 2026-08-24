@@ -1,9 +1,19 @@
+import logging
 import os
 import re
+import time
 
 from google import genai
+from google.genai import errors as genai_errors
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+logger = logging.getLogger("steam_etl.llm_etl_generator")
+
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
+
+class QuotaExceededError(RuntimeError):
+    """Raised when the Gemini API rejects a call for exceeding a rate/quota limit.
+    Distinct from other failures because retrying with corrected code can't fix it."""
 
 SYSTEM_PROMPT = """You are a data engineer writing a Python ETL transformation.
 
@@ -73,5 +83,19 @@ def generate_etl_code(
 ) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     prompt = _build_prompt(file_format, ddl, sample, previous_code, previous_error)
-    response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+    logger.info("Calling Gemini model=%s (prompt=%d chars)...", MODEL_NAME, len(prompt))
+    started = time.monotonic()
+    try:
+        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+    except genai_errors.APIError as exc:
+        if exc.code == 429 or exc.status == "RESOURCE_EXHAUSTED":
+            logger.warning("Gemini quota/rate limit hit: %s", exc.message)
+            raise QuotaExceededError(
+                f"Gemini API quota exceeded for model '{MODEL_NAME}': {exc.message} "
+                "This is a plan/billing limit, not a code bug - retrying with corrected "
+                "code won't help. Wait for the quota to reset or upgrade your Google AI "
+                "Studio plan, then try again."
+            ) from exc
+        raise
+    logger.info("Gemini responded in %.1fs (%d chars)", time.monotonic() - started, len(response.text))
     return _extract_code(response.text)

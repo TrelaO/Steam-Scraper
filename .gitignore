@@ -227,3 +227,6 @@ backend/data/*.db-wal
 backend/data/*.db-shm
 backend/landing/*
 !backend/landing/.gitkeep
+
+# Local scratch datasets (e.g. manually downloaded from Kaggle) - never committed
+/data/

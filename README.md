@@ -1,4 +1,4 @@
-# Steam AI-ETL
+# Steam Scraper
 
 Mini-hurtownia danych Steam z autogeneracją kodu ETL przez LLM (Gemini). System przyjmuje
 ten sam zbiór danych Steam w trzech formatach (CSV, JSON, XLSX), wykrywa format i za każdym
@@ -43,8 +43,8 @@ warehouse.db i wygenerowany kod ETL lądują bezpośrednio w repo, nie tylko w k
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env   # wpisz GEMINI_API_KEY z aistudio.google.com
+pip install -r ../requirements.txt
+copy ..\.env.example .env   # wpisz GEMINI_API_KEY z aistudio.google.com
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -53,8 +53,8 @@ Endpointy (wszystkie pod `/api`):
 - `POST /api/etl/run/{file_id}` — generuje kod ETL przez Gemini, wykonuje go w sandboxie
   (do 3 prób z samopoprawianiem na błędach), zapisuje wygenerowany kod do `generated_etl/`
 - `GET /api/etl/status/{job_id}` — status/logi/kod danego uruchomienia
-- `GET /api/analytics/*` — zapytania pod dashboard (cena/zniżka wg gatunku i roku, cena vs
-  recenzje, wariancja ceny wg platformy)
+- `GET /api/games` — zawartość hurtowni: `fact_game` spłaszczone z jego wymiarami
+  (nazwa gry, gatunki, platforma, cena, itd.), pod dashboard
 
 ### Frontend (React + Vite + TS)
 
@@ -70,7 +70,8 @@ Dev server na `:5173` proxuje `/api` do backendu na `:8000` (patrz
 [frontend/vite.config.ts](frontend/vite.config.ts)) — backend musi wtedy działać osobno.
 
 Strony: `Upload` (drag&drop + wykryty format), `PipelineRun` (wygenerowany kod + logi
-wykonania), `Dashboard` (wykresy trendów, recharts).
+wykonania), `Dashboard` (tabela z zawartością hurtowni — filtrowanie i sortowanie po
+kolumnach).
 
 ## Dane wejściowe
 
@@ -78,6 +79,18 @@ wykonania), `Dashboard` (wykresy trendów, recharts).
   (`games.csv`, `games.json` — ta sama treść w dwóch formatach).
 - XLSX: dokładany osobno (np. tabela kursów walut / słownik gatunków), eksport przez
   `pandas.to_excel()`.
+
+Pobierz zbiór ręcznie z [kaggle.com/datasets/fronkongames/steam-games-dataset](https://www.kaggle.com/datasets/fronkongames/steam-games-dataset)
+i wgraj `games.csv` / `games.json` przez stronę Upload w aplikacji — każdy osobno,
+żeby porównać jak LLM radzi sobie z każdym formatem.
+
+**Uwaga na rozmiar.** Pełny zbiór to ~400 MB (CSV) / ~930 MB (JSON), ~100k+ gier.
+Sandbox wykonujący wygenerowany kod ma limit 30s (`EXEC_TIMEOUT_SECONDS` w
+[backend/app/etl_runner.py](backend/app/etl_runner.py)), a kod od LLM prawie zawsze
+iteruje wiersz po wierszu — przy takiej skali każda próba skończy się timeoutem,
+paląc dzienny limit zapytań do Gemini bez żadnego efektu. Do testów pipeline'u wytnij
+najpierw mniejszą próbkę wierszy (np. `head -300 games.csv > games_sample.csv` w
+PowerShell/bash, lub `df.head(300)` w pandas) i wgrywaj tę próbkę zamiast pełnego pliku.
 
 Pliki źródłowe wgrywa się przez `/upload`; nie są commitowane (`backend/landing/`
 zignorowane w git). Wygenerowany kod ETL per format w `backend/generated_etl/` JEST
