@@ -1,9 +1,40 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
+import { getGeminiUsage, GeminiUsage } from "./api/client";
 import Dashboard from "./pages/Dashboard";
 import PipelineRun from "./pages/PipelineRun";
 import Upload from "./pages/Upload";
 import { applyTheme, getStoredTheme, getSystemTheme, Theme } from "./theme";
+
+const USAGE_POLL_MS = 20000;
+
+function GeminiUsageBadge() {
+  const [usage, setUsage] = useState<GeminiUsage | null>(null);
+
+  useEffect(() => {
+    function refresh() {
+      getGeminiUsage()
+        .then(setUsage)
+        .catch(() => setUsage(null));
+    }
+    refresh();
+    const id = window.setInterval(refresh, USAGE_POLL_MS);
+    return () => window.clearInterval(id);
+  }, []);
+
+  if (!usage) return null;
+
+  const variant = usage.remaining === 0 ? "badge-danger" : usage.remaining <= 3 ? "badge-warning" : "badge-neutral";
+
+  return (
+    <span
+      className={`badge ${variant}`}
+      title={`Self-imposed daily budget to avoid burning through Google's free-tier quota (resets ${usage.date} UTC).`}
+    >
+      Gemini {usage.count}/{usage.budget} today
+    </span>
+  );
+}
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme() ?? getSystemTheme());
@@ -28,6 +59,7 @@ export default function App() {
           </NavLink>
         </div>
         <span className="navbar-spacer" />
+        <GeminiUsageBadge />
         <button
           className="icon-btn"
           onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}

@@ -69,3 +69,14 @@ export function listGames(): Promise<GameRow[]> {
 export function clearWarehouse(): Promise<{ status: string }> {
   return fetch(`${API_BASE}/warehouse`, { method: "DELETE" }).then(handle<{ status: string }>);
 }
+
+export interface GeminiUsage {
+  date: string;
+  count: number;
+  budget: number;
+  remaining: number;
+}
+
+export function getGeminiUsage(): Promise<GeminiUsage> {
+  return fetch(`${API_BASE}/gemini-usage`).then(handle<GeminiUsage>);
+}

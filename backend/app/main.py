@@ -16,7 +16,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("steam_etl.main")
 
-from . import analytics_queries, db, etl_runner  # noqa: E402  (needs load_dotenv() first)
+from . import analytics_queries, db, etl_runner, quota_guard  # noqa: E402  (needs load_dotenv() first)
 from .format_detector import detect_format  # noqa: E402
 from .models import ETLJobStatus, UploadResponse  # noqa: E402
 
@@ -158,6 +158,11 @@ def clear_warehouse():
     logger.info("Clearing warehouse data (dim_game, dim_genre, bridge_game_genre, fact_game)")
     db.clear_data()
     return {"status": "cleared"}
+
+
+@api.get("/gemini-usage")
+def gemini_usage():
+    return quota_guard.get_usage()
 
 
 app.include_router(api)

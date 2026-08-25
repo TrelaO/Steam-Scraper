@@ -43,6 +43,18 @@ def _build_sandbox_globals(df: pd.DataFrame, conn: sqlite3.Connection) -> dict:
     return {"__builtins__": safe_builtins, "pd": pd, "df": df, "conn": conn}
 
 
+def _format_generated_code_traceback(exc: BaseException) -> str:
+    """Trims the traceback down to just the frames inside the generated code (the
+    exec'd string, filename '<string>'), dropping our own ThreadPoolExecutor/sandbox
+    plumbing - keeps retry prompts shorter and the signal focused on the LLM's own bug."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    user_frames = [f for f in frames if f.filename == "<string>"]
+    lines = ["Traceback (most recent call last):\n"]
+    lines.extend(traceback.format_list(user_frames))
+    lines.extend(traceback.format_exception_only(type(exc), exc))
+    return "".join(lines).strip()
+
+
 def _execute_once(code: str, df: pd.DataFrame, conn: sqlite3.Connection) -> dict:
     sandbox = _build_sandbox_globals(df, conn)
 
@@ -83,7 +95,7 @@ def run_etl_with_retries(
             logger.info("Attempt %d succeeded: %s", attempt, result)
             return {"status": "success", "code": code, "logs": logs, "result": result}
         except Exception as exc:
-            error_text = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc()}"
+            error_text = _format_generated_code_traceback(exc)
             logs.append({"attempt": attempt, "status": "error", "error": error_text, "code": code})
             if on_progress:
                 on_progress(list(logs))

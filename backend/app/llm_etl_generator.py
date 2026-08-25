@@ -6,6 +6,8 @@ import time
 from google import genai
 from google.genai import errors as genai_errors
 
+from . import quota_guard
+
 logger = logging.getLogger("steam_etl.llm_etl_generator")
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
@@ -81,6 +83,8 @@ def generate_etl_code(
     previous_code: str | None = None,
     previous_error: str | None = None,
 ) -> str:
+    quota_guard.check_and_reserve()
+
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     prompt = _build_prompt(file_format, ddl, sample, previous_code, previous_error)
     logger.info("Calling Gemini model=%s (prompt=%d chars)...", MODEL_NAME, len(prompt))
