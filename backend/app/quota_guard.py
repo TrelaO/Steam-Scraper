@@ -6,10 +6,14 @@ from pathlib import Path
 
 USAGE_FILE = Path(__file__).resolve().parent.parent / "data" / "gemini_usage.json"
 
-# Google's free tier caps gemini-3.6-flash at 20 requests/day (see the 429 error text:
-# "limit: 20, model: gemini-3.6-flash"). Default a couple below that so our own count
-# drifting slightly from Google's still fails safely before a real 429 mid-run.
-DAILY_BUDGET = int(os.getenv("GEMINI_DAILY_CALL_BUDGET", "18"))
+# On the free tier, Google caps gemini-3.6-flash at 20 requests/day - that's what this
+# was originally calibrated against. Once billing is enabled that cap goes away (paid
+# tiers are limited by per-minute request/token throughput instead, e.g. ~150-300 RPM
+# at Tier 1 - see https://aistudio.google.com/rate-limit for your account's actual
+# numbers), so 18/day would now just be an artificial bottleneck. This default is a
+# generous safety net against a runaway bug/loop, not a real reflection of your tier -
+# lower it back down if you're still on the free tier, or raise it further as needed.
+DAILY_BUDGET = int(os.getenv("GEMINI_DAILY_CALL_BUDGET", "200"))
 
 _lock = threading.Lock()
 

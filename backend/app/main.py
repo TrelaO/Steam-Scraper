@@ -61,14 +61,59 @@ async def upload(file: UploadFile):
     return UploadResponse(file_id=file_id, filename=file.filename, detected_format=fmt)
 
 
+def _load_json_dataframe(path: Path) -> pd.DataFrame:
+    with open(path, "r", encoding="utf-8") as f:
+        peek = f.read(256).lstrip()
+
+    if peek[:1] == "{":
+        # Top-level JSON object keyed by id, e.g. {"<app_id>": {...fields...}, ...}.
+        # pandas' default read_json orientation treats each top-level key as a COLUMN
+        # (games as columns, fields as rows) instead of a row - for a file with tens
+        # of thousands of games that turns a "10 row sample" into a 60M-character
+        # prompt (10 attribute-rows x every game as its own column). orient="index"
+        # makes each top-level key a row instead, which is what we actually want.
+        df = pd.read_json(path, orient="index")
+        df.index.name = "app_id"
+        return df.reset_index()
+
+    return pd.read_json(path)
+
+
 def _load_dataframe(path: Path, fmt: str) -> pd.DataFrame:
     if fmt == "csv":
         return pd.read_csv(path)
     if fmt == "json":
-        return pd.read_json(path)
+        return _load_json_dataframe(path)
     if fmt == "xlsx":
         return pd.read_excel(path)
     raise HTTPException(400, f"Unsupported format: {fmt}")
+
+
+SAMPLE_ROWS = 10
+MAX_CELL_CHARS = 100
+
+
+def _truncate_cell(value: object) -> object:
+    if isinstance(value, str) and len(value) > MAX_CELL_CHARS:
+        return value[:MAX_CELL_CHARS] + "…"
+    if isinstance(value, (list, dict)):
+        text = str(value)
+        if len(text) > MAX_CELL_CHARS:
+            return text[:MAX_CELL_CHARS] + "…"
+    return value
+
+
+def _build_sample(df: pd.DataFrame) -> str:
+    """A few rows, but with every cell capped at MAX_CELL_CHARS. Real-world exports
+    can carry huge free-text fields (game descriptions, screenshot URL lists) that
+    are irrelevant to inferring the column mapping - the LLM needs to see column
+    names and a representative snippet per column, not full paragraphs. Uncapped,
+    a single verbose row can be several KB, blowing up the prompt (and token usage)
+    regardless of how few rows are sampled."""
+    preview = df.head(SAMPLE_ROWS).copy()
+    for col in preview.columns:
+        preview[col] = preview[col].apply(_truncate_cell)
+    return preview.to_csv(index=False)
 
 
 def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
@@ -78,7 +123,7 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
 
     try:
         df = _load_dataframe(meta["path"], meta["format"])
-        sample = df.head(10).to_csv(index=False)
+        sample = _build_sample(df)
 
         conn = db.get_connection()
         try:

@@ -12,6 +12,14 @@ logger = logging.getLogger("steam_etl.llm_etl_generator")
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
+# Google's 429 responses can include a RetryInfo.retryDelay hint (a few seconds to
+# ~1min for a short-window rate limit). If it's under this, wait it out and retry the
+# SAME call once automatically - a rate limit isn't a code bug, so unlike the normal
+# attempt loop, retrying with "corrected" code would be pointless; just retrying the
+# identical request after the suggested delay is the correct move. A longer delay
+# (e.g. a daily quota reset reported in hours) isn't worth blocking the request for.
+MAX_AUTO_RETRY_DELAY_SECONDS = 90
+
 
 class QuotaExceededError(RuntimeError):
     """Raised when the Gemini API rejects a call for exceeding a rate/quota limit.
@@ -76,6 +84,22 @@ def _extract_code(text: str) -> str:
     return match.group(1).strip() if match else text.strip()
 
 
+def _extract_retry_delay_seconds(exc: genai_errors.APIError) -> float | None:
+    """Pulls the RetryInfo.retryDelay hint (e.g. "30.6s") out of a 429's error
+    body, if present. Defensive: the exact shape isn't a stable contract, so any
+    parsing failure just means "no hint found" rather than raising."""
+    try:
+        details = exc.details.get("error", {}).get("details", [])
+        for item in details:
+            if str(item.get("@type", "")).endswith("RetryInfo"):
+                delay = item.get("retryDelay", "")
+                if isinstance(delay, str) and delay.endswith("s"):
+                    return float(delay[:-1])
+    except Exception:
+        pass
+    return None
+
+
 def generate_etl_code(
     file_format: str,
     ddl: str,
@@ -93,6 +117,22 @@ def generate_etl_code(
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
     except genai_errors.APIError as exc:
         if exc.code == 429 or exc.status == "RESOURCE_EXHAUSTED":
+            retry_delay = _extract_retry_delay_seconds(exc)
+            if retry_delay is not None and retry_delay <= MAX_AUTO_RETRY_DELAY_SECONDS:
+                logger.warning(
+                    "Gemini rate limit hit, waiting %.0fs and retrying once: %s",
+                    retry_delay, exc.message,
+                )
+                time.sleep(retry_delay + 1)
+                try:
+                    response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+                    logger.info(
+                        "Gemini responded in %.1fs after rate-limit retry (%d chars)",
+                        time.monotonic() - started, len(response.text),
+                    )
+                    return _extract_code(response.text)
+                except genai_errors.APIError as retry_exc:
+                    exc = retry_exc
             logger.warning("Gemini quota/rate limit hit: %s", exc.message)
             raise QuotaExceededError(
                 f"Gemini API quota exceeded for model '{MODEL_NAME}': {exc.message} "

@@ -8,7 +8,7 @@ services:
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
-      GEMINI_DAILY_CALL_BUDGET: ${GEMINI_DAILY_CALL_BUDGET:-18}
+      GEMINI_DAILY_CALL_BUDGET: ${GEMINI_DAILY_CALL_BUDGET:-200}
     volumes:
       - ./backend/data:/app/data
       - ./backend/landing:/app/landing
