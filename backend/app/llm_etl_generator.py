@@ -45,6 +45,9 @@ Rules:
   (e.g. skip rows without a usable app id, coerce types, split delimited genre lists).
 - Use INSERT OR IGNORE / INSERT OR REPLACE as appropriate to avoid unique-constraint failures
   on re-runs (e.g. dim_game.app_id, dim_genre.genre_name).
+- fact_game has a UNIQUE constraint on (game_sk, date_sk, platform_sk). Use
+  INSERT OR REPLACE INTO fact_game (not plain INSERT) so re-running the same file on
+  the same day updates that snapshot instead of accumulating duplicate rows.
 - For dim_date, look up the existing date_sk for the snapshot/import date (today) rather than
   inserting new rows.
 - For dim_platform, look up the existing platform_sk matching the game's OS support flags

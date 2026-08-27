@@ -24,3 +24,4 @@ class ETLJobStatus(BaseModel):
     logs: list[ETLAttemptLog] = []
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    current_step: Optional[str] = None

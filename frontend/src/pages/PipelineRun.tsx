@@ -18,13 +18,18 @@ export default function PipelineRun() {
   const [job, setJob] = useState<ETLJobStatus | null>(initialJob);
   const [error, setError] = useState<string | null>(null);
 
-  // Initial fetch, e.g. on a direct link or a page refresh where router state is gone.
+  // Always re-sync with the server on mount, keyed only by jobId - not gated on
+  // whether router state already seeded a job. Router state can be a stale snapshot
+  // (e.g. the "running, no logs yet" state from the moment the run was kicked off),
+  // and skipping the fetch when it's present made returning to this page (nav away
+  // and back, browser back/forward) show outdated or seemingly "reset" history
+  // instead of the real current state.
   useEffect(() => {
-    if (job || !jobId) return;
+    if (!jobId) return;
     getEtlStatus(jobId)
       .then(setJob)
       .catch((err) => setError((err as Error).message));
-  }, [job, jobId]);
+  }, [jobId]);
 
   // While the job is still running server-side, poll for live progress (attempts as
   // they complete) instead of leaving the user staring at a spinner with no feedback.
@@ -69,11 +74,15 @@ export default function PipelineRun() {
         </span>
 
         {isRunning && (
-          <p className="muted" style={{ marginTop: 12 }}>
-            Attempt {currentAttempt} of {MAX_ATTEMPTS} — calling Gemini and executing the
-            generated code. Each attempt can take up to a minute; failed attempts are fed
-            back to the model for a correction automatically.
-          </p>
+          <>
+            <p className="muted" style={{ marginTop: 12, marginBottom: 4 }}>
+              Attempt {currentAttempt} of {MAX_ATTEMPTS} — failed attempts are fed back to
+              the model for a correction automatically.
+            </p>
+            <p className="job-id" style={{ fontWeight: 600 }}>
+              {job.current_step ?? "Starting..."}
+            </p>
+          </>
         )}
 
         {job.error && <div className="error-box">{job.error}</div>}

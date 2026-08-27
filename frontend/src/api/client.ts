@@ -23,6 +23,7 @@ export interface ETLJobStatus {
   logs: ETLAttemptLog[];
   result?: Record<string, unknown>;
   error?: string;
+  current_step?: string;
 }
 
 export interface GameRow {
@@ -62,8 +63,49 @@ export function getEtlStatus(jobId: string): Promise<ETLJobStatus> {
   return fetch(`${API_BASE}/etl/status/${jobId}`).then(handle<ETLJobStatus>);
 }
 
-export function listGames(): Promise<GameRow[]> {
-  return fetch(`${API_BASE}/games`).then(handle<GameRow[]>);
+export interface GamesPage {
+  rows: GameRow[];
+  has_more: boolean;
+}
+
+export function listGames(params: {
+  q?: string;
+  sort?: string;
+  dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}): Promise<GamesPage> {
+  const usp = new URLSearchParams();
+  if (params.q) usp.set("q", params.q);
+  if (params.sort) usp.set("sort", params.sort);
+  if (params.dir) usp.set("dir", params.dir);
+  if (params.limit !== undefined) usp.set("limit", String(params.limit));
+  if (params.offset !== undefined) usp.set("offset", String(params.offset));
+  return fetch(`${API_BASE}/games?${usp.toString()}`).then(handle<GamesPage>);
+}
+
+export interface YearCohort {
+  year: number;
+  avg_price: number;
+  avg_discount: number;
+  count: number;
+}
+
+export function getPriceByYear(): Promise<YearCohort[]> {
+  return fetch(`${API_BASE}/analytics/price-by-year`).then(handle<YearCohort[]>);
+}
+
+export interface PriceHistoryPoint {
+  price_usd: number;
+  discount_pct: number | null;
+  platform_combo: string | null;
+  snapshot_date: string | null;
+}
+
+export function getGamePriceHistory(appId: string): Promise<PriceHistoryPoint[]> {
+  return fetch(`${API_BASE}/games/${encodeURIComponent(appId)}/history`).then(
+    handle<PriceHistoryPoint[]>
+  );
 }
 
 export function clearWarehouse(): Promise<{ status: string }> {

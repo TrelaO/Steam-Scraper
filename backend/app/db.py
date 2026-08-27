@@ -1,6 +1,9 @@
+import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
+
+logger = logging.getLogger("steam_etl.db")
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "warehouse.db"
 
@@ -59,9 +62,16 @@ DDL_STATEMENTS = [
         peak_ccu INT,
         positive_reviews INT,
         negative_reviews INT,
-        average_playtime_mins INT
+        average_playtime_mins INT,
+        UNIQUE (game_sk, date_sk, platform_sk)
     )
     """,
+    # Re-running the same file on the same day previously kept appending a fresh
+    # fact_game row per game with no way to tell it apart from the last run's -
+    # the UNIQUE constraint above lets generated code use INSERT OR REPLACE instead,
+    # so a same-day re-import updates that snapshot rather than duplicating it.
+    "CREATE INDEX IF NOT EXISTS idx_dim_game_name ON dim_game(game_name)",
+    "CREATE INDEX IF NOT EXISTS idx_fact_game_game_sk ON fact_game(game_sk)",
 ]
 
 
@@ -75,16 +85,70 @@ def get_connection() -> sqlite3.Connection:
     # check_same_thread=False: the connection is opened on the request thread but the
     # generated ETL code runs it from a worker thread (etl_runner's timeout executor).
     # Access is still strictly sequential (never concurrent), so this is safe here.
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # timeout= (Python driver) and PRAGMA busy_timeout (SQLite itself) both needed:
+    # without either, a second connection hitting the DB while another is mid-write -
+    # a long-running ETL job, a migration, anything - gets "database is locked"
+    # immediately instead of waiting a moment for the lock to clear. 30s covers even
+    # a slow ETL write against a large dataset.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout = 30000;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
+
+
+def _migrate_fact_game_unique_constraint(conn: sqlite3.Connection) -> None:
+    """fact_game gained a UNIQUE(game_sk, date_sk, platform_sk) constraint after the
+    table may already have existed without it - CREATE TABLE IF NOT EXISTS never
+    retrofits an existing table, and clearing data (DELETE FROM) doesn't touch the
+    schema either. Detect the old shape and migrate in place, deduplicating any
+    existing rows by keeping the most-recently-inserted one per (game_sk, date_sk,
+    platform_sk) - the same "later snapshot wins" semantics INSERT OR REPLACE gives
+    going forward.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fact_game'"
+    ).fetchone()
+    if row is None or row[0] is None or "UNIQUE" in row[0].upper():
+        return  # doesn't exist yet (fresh DB) or already migrated
+
+    logger.info("Migrating fact_game to add UNIQUE(game_sk, date_sk, platform_sk)...")
+    conn.execute("ALTER TABLE fact_game RENAME TO fact_game_old")
+    conn.execute("""
+        CREATE TABLE fact_game (
+            fact_sk INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_sk INT REFERENCES dim_game(game_sk),
+            date_sk INT REFERENCES dim_date(date_sk),
+            platform_sk INT REFERENCES dim_platform(platform_sk),
+            price_usd DECIMAL(10,2),
+            discount_pct INT,
+            peak_ccu INT,
+            positive_reviews INT,
+            negative_reviews INT,
+            average_playtime_mins INT,
+            UNIQUE (game_sk, date_sk, platform_sk)
+        )
+    """)
+    conn.execute("""
+        INSERT OR REPLACE INTO fact_game
+            (fact_sk, game_sk, date_sk, platform_sk, price_usd, discount_pct,
+             peak_ccu, positive_reviews, negative_reviews, average_playtime_mins)
+        SELECT fact_sk, game_sk, date_sk, platform_sk, price_usd, discount_pct,
+               peak_ccu, positive_reviews, negative_reviews, average_playtime_mins
+        FROM fact_game_old
+        ORDER BY fact_sk
+    """)
+    before = conn.execute("SELECT COUNT(*) FROM fact_game_old").fetchone()[0]
+    after = conn.execute("SELECT COUNT(*) FROM fact_game").fetchone()[0]
+    conn.execute("DROP TABLE fact_game_old")
+    logger.info("Migration done: %d rows -> %d rows (%d duplicates removed)", before, after, before - after)
 
 
 def init_db() -> None:
     conn = get_connection()
     try:
         with conn:
+            _migrate_fact_game_unique_constraint(conn)
             for statement in DDL_STATEMENTS:
                 conn.execute(statement)
             _seed_dim_platform(conn)

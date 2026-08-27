@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -32,6 +33,43 @@ GENERATED_ETL_DIR.mkdir(parents=True, exist_ok=True)
 
 db.init_db()
 
+JOBS_FILE = APP_ROOT / "data" / "jobs.json"
+_jobs_lock = threading.Lock()
+
+
+def _persist_jobs() -> None:
+    """Job state otherwise lives only in this process's memory, so it's lost on
+    every container restart and can look "erased" if you navigate away and the
+    server happened to restart (e.g. during active development) before you check
+    back. Persisting to disk means a page revisit always gets the real last state."""
+    try:
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOBS_FILE.write_text(
+            json.dumps({jid: job.model_dump() for jid, job in _jobs.items()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("Failed to persist job state", exc_info=True)
+
+
+def _load_jobs() -> None:
+    if not JOBS_FILE.exists():
+        return
+    try:
+        raw = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+        for jid, data in raw.items():
+            _jobs[jid] = ETLJobStatus(**data)
+        logger.info("Loaded %d persisted job(s) from disk", len(raw))
+    except (json.JSONDecodeError, OSError, ValueError):
+        logger.warning("Failed to load persisted job state", exc_info=True)
+
+
+def _set_job(job_id: str, job: ETLJobStatus) -> None:
+    with _jobs_lock:
+        _jobs[job_id] = job
+        _persist_jobs()
+
+
 app = FastAPI(title="Steam Scraper")
 
 app.add_middleware(
@@ -43,10 +81,12 @@ app.add_middleware(
 
 api = APIRouter(prefix="/api")
 
-# In-memory registries. Fine for a single-process demo/research app; would move to the
-# database or a task queue for anything long-lived or multi-worker.
+# In-memory registries (jobs are also persisted to disk, see _persist_jobs/_load_jobs
+# above). Fine for a single-process demo/research app; would move to the database or a
+# task queue for anything long-lived or multi-worker.
 _files: dict[str, dict] = {}
 _jobs: dict[str, ETLJobStatus] = {}
+_load_jobs()
 
 
 @api.post("/upload", response_model=UploadResponse)
@@ -134,9 +174,14 @@ def _build_sample(df: pd.DataFrame) -> str:
 def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
     def report_progress(logs: list) -> None:
         current = _jobs[job_id]
-        _jobs[job_id] = current.model_copy(update={"logs": logs})
+        _set_job(job_id, current.model_copy(update={"logs": logs}))
+
+    def report_step(msg: str) -> None:
+        current = _jobs[job_id]
+        _set_job(job_id, current.model_copy(update={"current_step": msg}))
 
     try:
+        report_step("Loading and parsing the uploaded file...")
         df = _load_dataframe(meta["path"], meta["format"])
         sample = _build_sample(df)
 
@@ -149,6 +194,7 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
                 ddl=db.get_ddl_text(),
                 sample=sample,
                 on_progress=report_progress,
+                on_step=report_step,
             )
             if outcome["status"] == "success":
                 conn.commit()
@@ -161,7 +207,7 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
             artifact_path = GENERATED_ETL_DIR / f"{meta['format']}_{job_id}.py"
             artifact_path.write_text(outcome["code"], encoding="utf-8")
 
-        _jobs[job_id] = ETLJobStatus(
+        _set_job(job_id, ETLJobStatus(
             job_id=job_id,
             file_id=file_id,
             status=outcome["status"],
@@ -169,15 +215,15 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
             logs=outcome.get("logs", []),
             result=outcome.get("result"),
             error=outcome.get("error"),
-        )
+        ))
     except Exception as exc:  # keeps a crash in the background thread from vanishing silently
         logger.exception("ETL job %s crashed", job_id)
-        _jobs[job_id] = ETLJobStatus(
+        _set_job(job_id, ETLJobStatus(
             job_id=job_id,
             file_id=file_id,
             status="failed",
             error=f"{exc.__class__.__name__}: {exc}",
-        )
+        ))
 
 
 @api.post("/etl/run/{file_id}", response_model=ETLJobStatus)
@@ -188,7 +234,7 @@ def run_etl(file_id: str):
 
     job_id = str(uuid.uuid4())
     initial_status = ETLJobStatus(job_id=job_id, file_id=file_id, status="running", logs=[])
-    _jobs[job_id] = initial_status
+    _set_job(job_id, initial_status)
 
     logger.info("Starting ETL job %s for file_id=%s (format=%s)", job_id, file_id, meta["format"])
     threading.Thread(target=_run_etl_job, args=(job_id, file_id, meta), daemon=True).start()
@@ -205,10 +251,39 @@ def etl_status(job_id: str):
 
 
 @api.get("/games")
-def list_games():
+def list_games(
+    q: str | None = None,
+    sort: str = "snapshot_date",
+    dir: str = "desc",
+    limit: int = 50,
+    offset: int = 0,
+):
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     conn = db.get_connection()
     try:
-        return analytics_queries.list_games(conn)
+        rows, has_more = analytics_queries.list_games(
+            conn, search=q, sort_key=sort, sort_dir=dir, limit=limit, offset=offset
+        )
+        return {"rows": rows, "has_more": has_more}
+    finally:
+        conn.close()
+
+
+@api.get("/games/{app_id}/history")
+def game_price_history(app_id: str):
+    conn = db.get_connection()
+    try:
+        return analytics_queries.price_history_for_game(conn, app_id)
+    finally:
+        conn.close()
+
+
+@api.get("/analytics/price-by-year")
+def analytics_price_by_year():
+    conn = db.get_connection()
+    try:
+        return analytics_queries.price_by_release_year(conn)
     finally:
         conn.close()
 

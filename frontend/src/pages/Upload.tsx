@@ -1,11 +1,9 @@
-import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { runEtl, uploadFile, UploadResponse } from "../api/client";
+import { runEtl, uploadFile } from "../api/client";
+import { useUploadState } from "../uploadState";
 
 export default function Upload() {
-  const [uploaded, setUploaded] = useState<UploadResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { uploaded, setUploaded, busy, setBusy, error, setError } = useUploadState();
   const navigate = useNavigate();
 
   async function handleFile(file: File) {

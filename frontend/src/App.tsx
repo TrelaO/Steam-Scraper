@@ -5,6 +5,7 @@ import Dashboard from "./pages/Dashboard";
 import PipelineRun from "./pages/PipelineRun";
 import Upload from "./pages/Upload";
 import { applyTheme, getStoredTheme, getSystemTheme, Theme } from "./theme";
+import { UploadStateProvider } from "./uploadState";
 
 const USAGE_POLL_MS = 20000;
 
@@ -70,11 +71,13 @@ export default function App() {
         </button>
       </nav>
       <main>
-        <Routes>
-          <Route path="/" element={<Upload />} />
-          <Route path="/pipeline/:jobId" element={<PipelineRun />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-        </Routes>
+        <UploadStateProvider>
+          <Routes>
+            <Route path="/" element={<Upload />} />
+            <Route path="/pipeline/:jobId" element={<PipelineRun />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+          </Routes>
+        </UploadStateProvider>
       </main>
     </div>
   );

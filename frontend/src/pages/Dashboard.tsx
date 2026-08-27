@@ -11,9 +11,21 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { clearWarehouse, GameRow, listGames } from "../api/client";
+import {
+  clearWarehouse,
+  GameRow,
+  getGamePriceHistory,
+  getPriceByYear,
+  listGames,
+  PriceHistoryPoint,
+  YearCohort,
+} from "../api/client";
 
-const YEAR_PATTERN = /\b(19|20)\d{2}\b/;
+// A fixed-size slice rather than click-through pagination: simpler mental model for
+// browsing, and search (server-side, not filtered from this slice) is the tool for
+// finding something specific rather than paging deep into the whole warehouse.
+const DISPLAY_LIMIT = 1000;
+const SEARCH_DEBOUNCE_MS = 300;
 
 const CHART_TOOLTIP_STYLE = {
   background: "var(--surface)",
@@ -142,22 +154,57 @@ function ConfirmClearModal({
 
 export default function Dashboard() {
   const [rows, setRows] = useState<GameRow[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [tableLoading, setTableLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("game_name");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Newest-first by default rather than alphabetical, so whatever you just loaded
+  // shows up first instead of buried under older rows.
+  const [sortKey, setSortKey] = useState<SortKey>("snapshot_date");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
   const [showHelp, setShowHelp] = useState(false);
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [showConfirmClear, setShowConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
 
+  const [selectedGame, setSelectedGame] = useState<{ appId: string; name: string | null } | null>(null);
+  const [priceHistory, setPriceHistory] = useState<PriceHistoryPoint[]>([]);
+  const [priceHistoryLoading, setPriceHistoryLoading] = useState(false);
+
+  const [yearCohorts, setYearCohorts] = useState<YearCohort[]>([]);
+
+  // Debounce the search box - it drives a server request, not a client-side filter,
+  // so firing one per keystroke against a warehouse this size would be wasteful.
   useEffect(() => {
-    listGames()
-      .then(setRows)
+    const id = window.setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
+
+  useEffect(() => {
+    setTableLoading(true);
+    listGames({ q: search || undefined, sort: sortKey, dir: sortDir, limit: DISPLAY_LIMIT, offset: 0 })
+      .then((page) => {
+        setRows(page.rows);
+        setHasMore(page.has_more);
+      })
       .catch((err) => setError((err as Error).message))
-      .finally(() => setLoaded(true));
+      .finally(() => {
+        setTableLoading(false);
+        setLoaded(true);
+      });
+  }, [search, sortKey, sortDir]);
+
+  useEffect(() => {
+    getPriceByYear()
+      .then(setYearCohorts)
+      .catch(() => {
+        /* the table above already surfaces load errors; this chart just stays empty */
+      });
   }, []);
 
   async function handleClear() {
@@ -166,7 +213,10 @@ export default function Dashboard() {
     try {
       await clearWarehouse();
       setRows([]);
-      setSelectedAppId(null);
+      setHasMore(false);
+      setYearCohorts([]);
+      setSelectedGame(null);
+      setPriceHistory([]);
       setShowConfirmClear(false);
     } catch (err) {
       setClearError((err as Error).message);
@@ -184,65 +234,25 @@ export default function Dashboard() {
     }
   }
 
-  const filteredSorted = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    const filtered = needle
-      ? rows.filter((row) =>
-          [row.game_name, row.genres, row.app_id, row.platform_combo]
-            .filter(Boolean)
-            .some((field) => String(field).toLowerCase().includes(needle))
-        )
-      : rows;
+  function selectGame(row: GameRow) {
+    setSelectedGame({ appId: row.app_id, name: row.game_name });
+    setPriceHistoryLoading(true);
+    getGamePriceHistory(row.app_id)
+      .then(setPriceHistory)
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setPriceHistoryLoading(false));
+  }
 
-    const sorted = [...filtered].sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      if (av === null || av === undefined) return 1;
-      if (bv === null || bv === undefined) return -1;
-      if (typeof av === "number" && typeof bv === "number") return av - bv;
-      return String(av).localeCompare(String(bv));
-    });
-    if (sortDir === "desc") sorted.reverse();
-    return sorted;
-  }, [rows, search, sortKey, sortDir]);
+  const priceHistoryChartData = useMemo(
+    () =>
+      priceHistory
+        .filter((p) => p.snapshot_date)
+        .map((p) => ({ date: p.snapshot_date as string, price: p.price_usd }))
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    [priceHistory]
+  );
 
-  const releaseYearCohorts = useMemo(() => {
-    const buckets = new Map<number, { priceSum: number; discountSum: number; count: number }>();
-    for (const row of rows) {
-      if (row.price_usd === null || !row.release_date) continue;
-      const match = row.release_date.match(YEAR_PATTERN);
-      if (!match) continue;
-      const year = Number(match[0]);
-      const bucket = buckets.get(year) ?? { priceSum: 0, discountSum: 0, count: 0 };
-      bucket.priceSum += row.price_usd;
-      bucket.discountSum += row.discount_pct ?? 0;
-      bucket.count += 1;
-      buckets.set(year, bucket);
-    }
-    return Array.from(buckets.entries())
-      .map(([year, b]) => ({
-        year: String(year),
-        avgPrice: b.priceSum / b.count,
-        avgDiscount: b.discountSum / b.count,
-        count: b.count,
-      }))
-      .sort((a, b) => a.year.localeCompare(b.year));
-  }, [rows]);
-
-  const selectedGameName = rows.find((r) => r.app_id === selectedAppId)?.game_name ?? null;
-
-  const priceHistory = useMemo(() => {
-    if (!selectedAppId) return [];
-    return rows
-      .filter((r) => r.app_id === selectedAppId && r.price_usd !== null && r.snapshot_date)
-      .map((r) => ({
-        date: r.snapshot_date as string,
-        price: r.price_usd as number,
-        platform: r.platform_combo,
-        discount: r.discount_pct,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-  }, [rows, selectedAppId]);
+  const knowsAnyData = loaded && (rows.length > 0 || Boolean(search));
 
   return (
     <div className="page">
@@ -254,7 +264,7 @@ export default function Dashboard() {
         <button
           className="btn btn-danger"
           onClick={() => setShowConfirmClear(true)}
-          disabled={rows.length === 0}
+          disabled={!knowsAnyData}
           style={{ height: "fit-content", whiteSpace: "nowrap" }}
         >
           🗑 Clear database
@@ -263,48 +273,49 @@ export default function Dashboard() {
 
       {error && <div className="error-box">{error}</div>}
 
-      {loaded && !error && rows.length === 0 && (
+      {loaded && !error && rows.length === 0 && !search && (
         <div className="card">
           <p className="muted">No data yet — upload a file and run the ETL to populate the warehouse.</p>
         </div>
       )}
 
-      {rows.length > 0 && (
+      {(rows.length > 0 || search || yearCohorts.length > 0) && (
         <>
           <div className="card">
             <h2 style={{ marginTop: 0 }}>Price &amp; discount by release-year cohort</h2>
             <p className="muted">
               The dataset is a single snapshot, not a price history — this is the trend view
               that actually works on one-time-import data: games grouped by release year,
-              averaged. Hover a bar for the exact averages and cohort size.
+              averaged across the whole warehouse (computed server-side, not from the table
+              below). Hover a bar for the exact averages and cohort size.
             </p>
 
-            {releaseYearCohorts.length === 0 && (
+            {yearCohorts.length === 0 && (
               <p className="muted">No games with both a price and a parseable release date yet.</p>
             )}
-            {releaseYearCohorts.length > 0 && (
+            {yearCohorts.length > 0 && (
               <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={releaseYearCohorts}>
+                <BarChart data={yearCohorts}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                   <XAxis dataKey="year" stroke="var(--text-muted)" />
                   <YAxis stroke="var(--text-muted)" width={56} />
                   <Tooltip
                     contentStyle={CHART_TOOLTIP_STYLE}
                     formatter={(value: number, name: string) => {
-                      if (name === "avgPrice") return [`$${value.toFixed(2)}`, "Avg price"];
-                      if (name === "avgDiscount") return [`${value.toFixed(0)}%`, "Avg discount"];
+                      if (name === "avg_price") return [`$${value.toFixed(2)}`, "Avg price"];
+                      if (name === "avg_discount") return [`${value.toFixed(0)}%`, "Avg discount"];
                       return [value, name];
                     }}
-                    labelFormatter={(year: string) => {
-                      const bucket = releaseYearCohorts.find((c) => c.year === year);
+                    labelFormatter={(year: number) => {
+                      const bucket = yearCohorts.find((c) => c.year === year);
                       return `${year} (${bucket?.count ?? 0} game${bucket?.count === 1 ? "" : "s"})`;
                     }}
                   />
                   <Legend
-                    formatter={(name: string) => (name === "avgPrice" ? "Avg price (USD)" : "Avg discount %")}
+                    formatter={(name: string) => (name === "avg_price" ? "Avg price (USD)" : "Avg discount %")}
                   />
-                  <Bar dataKey="avgPrice" fill="#4f46e5" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="avgDiscount" fill="#f97316" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="avg_price" fill="#4f46e5" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="avg_discount" fill="#f97316" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -312,7 +323,7 @@ export default function Dashboard() {
 
           <div className="card">
             <h2 style={{ marginTop: 0 }}>
-              Price history{selectedGameName ? ` — ${selectedGameName}` : ""}
+              Price history{selectedGame?.name ? ` — ${selectedGame.name}` : ""}
             </h2>
             <p className="muted">
               Per-game trend across repeated ETL runs. With a one-off dataset import this will
@@ -321,21 +332,23 @@ export default function Dashboard() {
               brief on adding periodic Steam API snapshots).
             </p>
 
-            {!selectedAppId && (
+            {!selectedGame && (
               <p className="muted">Click a row in the table below to see that game's price over time.</p>
             )}
-            {selectedAppId && priceHistory.length === 0 && (
+            {selectedGame && priceHistoryLoading && <p className="muted">Loading...</p>}
+            {selectedGame && !priceHistoryLoading && priceHistoryChartData.length === 0 && (
               <p className="muted">No priced snapshots recorded for this game yet.</p>
             )}
-            {selectedAppId && priceHistory.length === 1 && (
+            {selectedGame && !priceHistoryLoading && priceHistoryChartData.length === 1 && (
               <p className="muted">
-                Only one snapshot recorded so far ({priceHistory[0].date}, ${priceHistory[0].price.toFixed(2)}).
-                Run the ETL again on a later date to build a trend.
+                Only one snapshot recorded so far ({priceHistoryChartData[0].date}, $
+                {priceHistoryChartData[0].price.toFixed(2)}). Run the ETL again on a later date to
+                build a trend.
               </p>
             )}
-            {priceHistory.length > 0 && (
+            {priceHistoryChartData.length > 0 && (
               <ResponsiveContainer width="100%" height={280}>
-                <LineChart data={priceHistory}>
+                <LineChart data={priceHistoryChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                   <XAxis dataKey="date" stroke="var(--text-muted)" />
                   <YAxis stroke="var(--text-muted)" width={56} />
@@ -364,13 +377,17 @@ export default function Dashboard() {
               <input
                 className="search-input"
                 type="text"
-                placeholder="Filter by game, genre, or platform..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter by game name (starts with)..."
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
               />
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <span className="row-count">
-                  {filteredSorted.length} of {rows.length} rows
+                  {tableLoading
+                    ? "Loading..."
+                    : `Showing ${rows.length} row${rows.length === 1 ? "" : "s"}${
+                        hasMore ? " (more exist — use search to narrow down)" : ""
+                      }`}
                 </span>
                 <button className="help-btn" onClick={() => setShowHelp(true)}>
                   ❓ What do these columns mean?
@@ -397,11 +414,11 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredSorted.map((row, i) => (
+                  {rows.map((row, i) => (
                     <tr
                       key={`${row.app_id}-${row.platform_combo}-${row.snapshot_date}-${i}`}
-                      className={row.app_id === selectedAppId ? "selected" : ""}
-                      onClick={() => setSelectedAppId(row.app_id)}
+                      className={row.app_id === selectedGame?.appId ? "selected" : ""}
+                      onClick={() => selectGame(row)}
                     >
                       {COLUMNS.map((col) => (
                         <td key={col.key} className={col.numeric ? "numeric" : ""}>
