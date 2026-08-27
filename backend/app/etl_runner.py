@@ -12,7 +12,10 @@ from . import llm_etl_generator
 logger = logging.getLogger("steam_etl.etl_runner")
 
 MAX_ATTEMPTS = 3
-EXEC_TIMEOUT_SECONDS = 30
+# 30s repeatedly proved too tight against a real ~139k-row dataset even for otherwise-
+# correct generated code (a plain Python loop over that many rows adds up); 90s gives
+# real headroom while still bounding a truly broken/infinite-loop generation attempt.
+EXEC_TIMEOUT_SECONDS = 90
 
 # Generated ETL code may only import these modules. Keeps the sandbox from reaching
 # out to the filesystem/network/subprocess even though exec() itself can't be fully sealed.
@@ -22,12 +25,20 @@ ALLOWED_MODULES = {
     "collections", "decimal", "statistics", "string", "numpy",
 }
 
-_SAFE_BUILTIN_NAMES = (
-    "len", "range", "enumerate", "list", "dict", "set", "tuple", "str", "int",
-    "float", "bool", "min", "max", "sum", "sorted", "zip", "map", "filter",
-    "isinstance", "print", "Exception", "ValueError", "TypeError", "KeyError",
-    "StopIteration", "abs", "round", "any", "all", "None", "True", "False",
-)
+# Denylist rather than allowlist: an allowlist means every ordinary builtin the LLM
+# might reasonably use (next(), iter(), type(), getattr()...) has to be predicted and
+# added in advance, and missing one just breaks otherwise-correct generated code with
+# a NameError. Starting from ALL public builtins and denying only the genuinely
+# dangerous ones (file/process/interactive/introspection-of-globals) is more robust -
+# note this was never a hardened sandbox against a determined adversary anyway (any
+# object's __class__.__mro__ can reach far more than __builtins__ restricts), so this
+# is about avoiding accidental misuse, not defeating a deliberate escape attempt.
+_UNSAFE_BUILTIN_NAMES = frozenset({
+    "open", "eval", "exec", "compile", "__import__", "input", "breakpoint",
+    "exit", "quit", "help", "copyright", "credits", "license",
+    "globals", "locals", "vars", "dir",
+    "setattr", "delattr", "memoryview",
+})
 
 
 def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -38,7 +49,11 @@ def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 
 def _build_sandbox_globals(df: pd.DataFrame, conn: sqlite3.Connection) -> dict:
-    safe_builtins = {name: getattr(_builtins_module, name) for name in _SAFE_BUILTIN_NAMES}
+    safe_builtins = {
+        name: getattr(_builtins_module, name)
+        for name in dir(_builtins_module)
+        if not name.startswith("_") and name not in _UNSAFE_BUILTIN_NAMES
+    }
     safe_builtins["__import__"] = _guarded_import
     return {"__builtins__": safe_builtins, "pd": pd, "df": df, "conn": conn}
 

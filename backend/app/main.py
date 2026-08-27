@@ -89,8 +89,10 @@ def _load_dataframe(path: Path, fmt: str) -> pd.DataFrame:
     raise HTTPException(400, f"Unsupported format: {fmt}")
 
 
-SAMPLE_ROWS = 10
 MAX_CELL_CHARS = 100
+TARGET_SAMPLE_CHARS = 6000
+MIN_SAMPLE_ROWS = 3
+MAX_SAMPLE_ROWS = 30
 
 
 def _truncate_cell(value: object) -> object:
@@ -104,16 +106,29 @@ def _truncate_cell(value: object) -> object:
 
 
 def _build_sample(df: pd.DataFrame) -> str:
-    """A few rows, but with every cell capped at MAX_CELL_CHARS. Real-world exports
-    can carry huge free-text fields (game descriptions, screenshot URL lists) that
-    are irrelevant to inferring the column mapping - the LLM needs to see column
-    names and a representative snippet per column, not full paragraphs. Uncapped,
-    a single verbose row can be several KB, blowing up the prompt (and token usage)
-    regardless of how few rows are sampled."""
-    preview = df.head(SAMPLE_ROWS).copy()
-    for col in preview.columns:
-        preview[col] = preview[col].apply(_truncate_cell)
-    return preview.to_csv(index=False)
+    """Row count adapts to the table's actual width so the sample stays within a
+    roughly constant character budget (TARGET_SAMPLE_CHARS) regardless of column
+    count: a narrow table (few columns) gets more example rows, a wide one gets
+    fewer, since a fixed row count would otherwise make wide tables' samples grow
+    linearly with column count for no benefit to the LLM. Every cell is still
+    individually capped at MAX_CELL_CHARS first (free-text fields, URL arrays)."""
+    capped = df.head(MAX_SAMPLE_ROWS).copy()
+    for col in capped.columns:
+        capped[col] = capped[col].apply(_truncate_cell)
+
+    total_available = len(capped)
+    if total_available == 0:
+        return capped.to_csv(index=False)
+
+    rows = min(MIN_SAMPLE_ROWS, total_available)
+    best = capped.head(rows).to_csv(index=False)
+    while rows < total_available:
+        rows += 1
+        candidate = capped.head(rows).to_csv(index=False)
+        if len(candidate) > TARGET_SAMPLE_CHARS:
+            break
+        best = candidate
+    return best
 
 
 def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:

@@ -50,6 +50,12 @@ Rules:
 - For dim_platform, look up the existing platform_sk matching the game's OS support flags
   rather than inserting new rows.
 - Do NOT call conn.commit() or conn.close() — the caller manages the transaction.
+- A cell's value may itself be a list/array or dict, not just a scalar (e.g. a JSON
+  source's "genres" column holds actual Python lists, not strings to parse). NEVER
+  write `pd.isna(x)` or `x is None or pd.isna(x)` as your first check on a value that
+  might be list/array-like - calling pd.isna() on an array raises "the truth value of
+  an array is ambiguous". Always check `isinstance(x, (list, tuple, np.ndarray, dict))`
+  BEFORE any pd.isna() call, not after, so the array/list/dict branch is reached first.
 - Return a dict mapping table name to number of rows inserted, e.g.
   {"dim_game": 100, "fact_game": 100}.
 - Output ONLY the Python code for this one function (plus any needed imports at the top).
