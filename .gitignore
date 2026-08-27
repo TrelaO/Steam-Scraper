@@ -221,7 +221,7 @@ __marimo__/
 node_modules/
 frontend/dist/
 
-# Project data (research artifacts in generated_etl/ ARE tracked)
+# Project data
 backend/data/*.db
 backend/data/*.db-wal
 backend/data/*.db-shm
@@ -229,6 +229,9 @@ backend/data/gemini_usage.json
 backend/data/jobs.json
 backend/landing/*
 !backend/landing/.gitkeep
+
+# Generated ETL code (per-run artifact, not committed)
+backend/generated_etl/*.py
 
 # Local scratch datasets (e.g. manually downloaded from Kaggle) - never committed
 /data/

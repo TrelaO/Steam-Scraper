@@ -42,21 +42,21 @@ def list_games(
     sort_dir: str = "desc",
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[dict], bool]:
-    """Paginated, filtered, sorted warehouse content. Returns (rows, has_more).
+) -> tuple[list[dict], int]:
+    """Paginated, filtered, sorted warehouse content. Returns (rows, total).
 
-    Two deliberate scale choices, both proven necessary against a real ~278k-row
-    warehouse (a plain version of this query took 15s+ once OFFSET got deep):
-    - No COUNT(*): an exact total needs a full scan of every matching row regardless
-      of LIMIT, which alone cost over a second. We fetch limit+1 and check whether
-      the extra row came back instead - "there's more" without ever counting it all.
+    Scale choices, both proven necessary against a real ~278k-row warehouse:
+    - The total count is a SEPARATE, minimal query - just fact_game alone when there's
+      no search (66ms at 130k rows), or fact_game+dim_game only (skipping the platform/
+      date joins entirely) when there is (307ms) - not the COUNT(*) with the full
+      4-way join the row query needs, which alone cost over a second regardless of
+      LIMIT and made a naive "OFFSET deep into 278k rows" case take 15s+.
     - Genre lookup (a correlated subquery per game) runs only on the LIMIT'd result,
       not on every matching row before pagination - the dominant cost otherwise.
 
     OFFSET itself is still O(offset) - SQLite has to walk past every skipped row - so
-    this only stays fast for sequential Next/Previous browsing (the UI does not
-    support jumping to an arbitrary page). Search should be used to narrow down
-    rather than paging deep into an unfiltered 278k-row list.
+    this only stays fast for sequential browsing, not jumping deep into an unfiltered
+    list. Search (indexed prefix match) is the tool for narrowing down.
     """
     sort_col = _SORTABLE_COLUMNS.get(sort_key, _SORTABLE_COLUMNS["snapshot_date"])
     direction = "DESC" if sort_dir == "desc" else "ASC"
@@ -70,6 +70,14 @@ def list_games(
         where_clause = "WHERE dg.game_name LIKE ?"
         where_params = [f"{search}%"]
 
+    if search:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM fact_game f JOIN dim_game dg ON dg.game_sk = f.game_sk {where_clause}",
+            where_params,
+        ).fetchone()[0]
+    else:
+        total = conn.execute("SELECT COUNT(*) FROM fact_game").fetchone()[0]
+
     query = f"""
         SELECT
             dg.app_id, dg.game_name, dg.release_date, dg.game_sk,
@@ -81,9 +89,7 @@ def list_games(
         ORDER BY {sort_col} {direction}
         LIMIT ? OFFSET ?
     """
-    rows = _rows_as_dicts(conn, query, where_params + [limit + 1, offset])
-    has_more = len(rows) > limit
-    rows = rows[:limit]
+    rows = _rows_as_dicts(conn, query, where_params + [limit, offset])
 
     # One extra query for all rows' genres together, instead of one correlated
     # subquery per row - at limit=1000 that was ~1000 separate lookups and roughly
@@ -109,7 +115,7 @@ def list_games(
         genre_list = genres_by_sk.get(r.pop("game_sk"))
         r["genres"] = ", ".join(genre_list) if genre_list else None
 
-    return rows, has_more
+    return rows, total
 
 
 def price_by_release_year(conn: sqlite3.Connection) -> list[dict]:
@@ -129,6 +135,43 @@ def price_by_release_year(conn: sqlite3.Connection) -> list[dict]:
         ORDER BY year
     """
     return _rows_as_dicts(conn, query)
+
+
+def summary_stats(conn: sqlite3.Connection) -> dict:
+    """Headline KPIs for the warehouse - two cheap aggregate queries (no per-row
+    Python loop), each a single pass over fact_game / bridge_game_genre."""
+    row = conn.execute("""
+        SELECT
+            COUNT(DISTINCT f.game_sk) AS total_games,
+            AVG(f.price_usd) AS avg_price,
+            100.0 * SUM(CASE WHEN f.price_usd = 0 THEN 1 ELSE 0 END) / COUNT(*) AS pct_free,
+            SUM(f.positive_reviews) AS total_positive,
+            SUM(f.negative_reviews) AS total_negative,
+            AVG(f.average_playtime_mins) AS avg_playtime_mins
+        FROM fact_game f
+    """).fetchone()
+
+    top_genre_row = conn.execute("""
+        SELECT g.genre_name, COUNT(*) AS n
+        FROM bridge_game_genre bg
+        JOIN dim_genre g ON g.genre_sk = bg.genre_sk
+        GROUP BY g.genre_name
+        ORDER BY n DESC
+        LIMIT 1
+    """).fetchone()
+
+    total_positive = row[3] or 0
+    total_negative = row[4] or 0
+    total_reviews = total_positive + total_negative
+
+    return {
+        "total_games": row[0] or 0,
+        "avg_price": row[1],
+        "pct_free": row[2],
+        "positive_review_rate": (100.0 * total_positive / total_reviews) if total_reviews else None,
+        "avg_playtime_mins": row[5],
+        "top_genre": top_genre_row[0] if top_genre_row else None,
+    }
 
 
 def price_history_for_game(conn: sqlite3.Connection, app_id: str) -> list[dict]:

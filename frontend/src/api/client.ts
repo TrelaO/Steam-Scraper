@@ -65,7 +65,7 @@ export function getEtlStatus(jobId: string): Promise<ETLJobStatus> {
 
 export interface GamesPage {
   rows: GameRow[];
-  has_more: boolean;
+  total: number;
 }
 
 export function listGames(params: {
@@ -93,6 +93,19 @@ export interface YearCohort {
 
 export function getPriceByYear(): Promise<YearCohort[]> {
   return fetch(`${API_BASE}/analytics/price-by-year`).then(handle<YearCohort[]>);
+}
+
+export interface SummaryStats {
+  total_games: number;
+  avg_price: number | null;
+  pct_free: number | null;
+  positive_review_rate: number | null;
+  avg_playtime_mins: number | null;
+  top_genre: string | null;
+}
+
+export function getSummaryStats(): Promise<SummaryStats> {
+  return fetch(`${API_BASE}/analytics/summary`).then(handle<SummaryStats>);
 }
 
 export interface PriceHistoryPoint {

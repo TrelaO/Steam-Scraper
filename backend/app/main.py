@@ -198,6 +198,12 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
             )
             if outcome["status"] == "success":
                 conn.commit()
+                report_step("Removing games with any missing field...")
+                removed = db.remove_incomplete_games(conn)
+                if any(removed.values()):
+                    logger.info("Removed incomplete games after job %s: %s", job_id, removed)
+                    if outcome.get("result"):
+                        outcome["result"]["removed_incomplete"] = removed["dim_game"]
             else:
                 conn.rollback()
         finally:
@@ -258,14 +264,14 @@ def list_games(
     limit: int = 50,
     offset: int = 0,
 ):
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(limit, 1000))
     offset = max(0, offset)
     conn = db.get_connection()
     try:
-        rows, has_more = analytics_queries.list_games(
+        rows, total = analytics_queries.list_games(
             conn, search=q, sort_key=sort, sort_dir=dir, limit=limit, offset=offset
         )
-        return {"rows": rows, "has_more": has_more}
+        return {"rows": rows, "total": total}
     finally:
         conn.close()
 
@@ -284,6 +290,15 @@ def analytics_price_by_year():
     conn = db.get_connection()
     try:
         return analytics_queries.price_by_release_year(conn)
+    finally:
+        conn.close()
+
+
+@api.get("/analytics/summary")
+def analytics_summary():
+    conn = db.get_connection()
+    try:
+        return analytics_queries.summary_stats(conn)
     finally:
         conn.close()
 

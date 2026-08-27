@@ -16,8 +16,10 @@ import {
   GameRow,
   getGamePriceHistory,
   getPriceByYear,
+  getSummaryStats,
   listGames,
   PriceHistoryPoint,
+  SummaryStats,
   YearCohort,
 } from "../api/client";
 
@@ -65,6 +67,13 @@ const COLUMN_HELP: Record<SortKey, string> = {
   release_date: "The game's original release date (an attribute of the game, not the snapshot).",
   snapshot_date: "The date this row's data was imported/observed - i.e. dim_date, not the release date.",
 };
+
+// Auto-compact for large headline numbers (dataviz stat-tile contract: 1,284 / 12.9K).
+function formatCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString();
+}
 
 function formatCell(key: SortKey, value: GameRow[SortKey]): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -154,7 +163,7 @@ function ConfirmClearModal({
 
 export default function Dashboard() {
   const [rows, setRows] = useState<GameRow[]>([]);
-  const [hasMore, setHasMore] = useState(false);
+  const [total, setTotal] = useState(0);
   const [tableLoading, setTableLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -177,6 +186,7 @@ export default function Dashboard() {
   const [priceHistoryLoading, setPriceHistoryLoading] = useState(false);
 
   const [yearCohorts, setYearCohorts] = useState<YearCohort[]>([]);
+  const [summary, setSummary] = useState<SummaryStats | null>(null);
 
   // Debounce the search box - it drives a server request, not a client-side filter,
   // so firing one per keystroke against a warehouse this size would be wasteful.
@@ -190,7 +200,7 @@ export default function Dashboard() {
     listGames({ q: search || undefined, sort: sortKey, dir: sortDir, limit: DISPLAY_LIMIT, offset: 0 })
       .then((page) => {
         setRows(page.rows);
-        setHasMore(page.has_more);
+        setTotal(page.total);
       })
       .catch((err) => setError((err as Error).message))
       .finally(() => {
@@ -205,6 +215,11 @@ export default function Dashboard() {
       .catch(() => {
         /* the table above already surfaces load errors; this chart just stays empty */
       });
+    getSummaryStats()
+      .then(setSummary)
+      .catch(() => {
+        /* same - non-fatal, the tile row just stays empty */
+      });
   }, []);
 
   async function handleClear() {
@@ -213,8 +228,9 @@ export default function Dashboard() {
     try {
       await clearWarehouse();
       setRows([]);
-      setHasMore(false);
+      setTotal(0);
       setYearCohorts([]);
+      setSummary(null);
       setSelectedGame(null);
       setPriceHistory([]);
       setShowConfirmClear(false);
@@ -281,6 +297,50 @@ export default function Dashboard() {
 
       {(rows.length > 0 || search || yearCohorts.length > 0) && (
         <>
+          {summary && (
+            <div className="card">
+              <h2 style={{ marginTop: 0 }}>Warehouse at a glance</h2>
+              <div className="result-grid">
+                <div className="result-tile">
+                  <div className="result-tile-value">{formatCompact(summary.total_games)}</div>
+                  <div className="result-tile-label">Games in warehouse</div>
+                </div>
+                <div className="result-tile">
+                  <div className="result-tile-value">
+                    {summary.avg_price === null ? "—" : `$${summary.avg_price.toFixed(2)}`}
+                  </div>
+                  <div className="result-tile-label">Average price</div>
+                </div>
+                <div className="result-tile">
+                  <div className="result-tile-value">
+                    {summary.pct_free === null ? "—" : `${summary.pct_free.toFixed(0)}%`}
+                  </div>
+                  <div className="result-tile-label">Free to play</div>
+                </div>
+                <div className="result-tile">
+                  <div className="result-tile-value">
+                    {summary.positive_review_rate === null
+                      ? "—"
+                      : `${summary.positive_review_rate.toFixed(0)}%`}
+                  </div>
+                  <div className="result-tile-label">Positive review rate</div>
+                </div>
+                <div className="result-tile">
+                  <div className="result-tile-value">
+                    {summary.avg_playtime_mins === null
+                      ? "—"
+                      : `${(summary.avg_playtime_mins / 60).toFixed(1)} hrs`}
+                  </div>
+                  <div className="result-tile-label">Average playtime</div>
+                </div>
+                <div className="result-tile">
+                  <div className="result-tile-value">{summary.top_genre ?? "—"}</div>
+                  <div className="result-tile-label">Most common genre</div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <h2 style={{ marginTop: 0 }}>Price &amp; discount by release-year cohort</h2>
             <p className="muted">
@@ -383,11 +443,7 @@ export default function Dashboard() {
               />
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <span className="row-count">
-                  {tableLoading
-                    ? "Loading..."
-                    : `Showing ${rows.length} row${rows.length === 1 ? "" : "s"}${
-                        hasMore ? " (more exist — use search to narrow down)" : ""
-                      }`}
+                  {tableLoading ? "Loading..." : `Showing ${rows.length} of ${total} row${total === 1 ? "" : "s"}`}
                 </span>
                 <button className="help-btn" onClick={() => setShowHelp(true)}>
                   ❓ What do these columns mean?

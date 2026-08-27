@@ -198,6 +198,55 @@ def clear_data() -> None:
         conn.close()
 
 
+_INCOMPLETE_FACT_CHECK = """
+    dg.game_name IS NULL OR dg.release_date IS NULL
+    OR dg.required_age IS NULL OR dg.estimated_owners IS NULL
+    OR dg.owners_min IS NULL OR dg.owners_max IS NULL
+    OR f.platform_sk IS NULL OR f.price_usd IS NULL
+    OR f.discount_pct IS NULL OR f.peak_ccu IS NULL
+    OR f.positive_reviews IS NULL OR f.negative_reviews IS NULL
+    OR f.average_playtime_mins IS NULL
+    OR NOT EXISTS (SELECT 1 FROM bridge_game_genre bg WHERE bg.game_sk = dg.game_sk)
+"""
+
+
+def remove_incomplete_games(conn: sqlite3.Connection) -> dict:
+    """Removes games where any mapped field is missing (NULL) - not simply zero,
+    which is a legitimate value (no discount, zero reviews yet, free to play, etc.),
+    just an absent one. Runs per fact_game row (one per game/date/platform snapshot):
+    an incomplete snapshot is deleted; a game left with no snapshots, or with no
+    genre at all, is removed too. Deliberately deterministic backend logic rather
+    than an LLM-prompt instruction - this policy should apply the same way every
+    time, not depend on the generated code remembering to implement it.
+    """
+    with conn:
+        deleted_facts = conn.execute(f"""
+            DELETE FROM fact_game
+            WHERE fact_sk IN (
+                SELECT f.fact_sk
+                FROM fact_game f
+                JOIN dim_game dg ON dg.game_sk = f.game_sk
+                WHERE {_INCOMPLETE_FACT_CHECK}
+            )
+        """).rowcount
+
+        deleted_bridge = conn.execute("""
+            DELETE FROM bridge_game_genre
+            WHERE game_sk NOT IN (SELECT game_sk FROM fact_game)
+        """).rowcount
+
+        deleted_games = conn.execute("""
+            DELETE FROM dim_game
+            WHERE game_sk NOT IN (SELECT game_sk FROM fact_game)
+        """).rowcount
+
+    return {
+        "fact_game": deleted_facts,
+        "bridge_game_genre": deleted_bridge,
+        "dim_game": deleted_games,
+    }
+
+
 def _seed_dim_date(conn: sqlite3.Connection, start_year: int = 2015, end_year: int = 2030) -> None:
     if conn.execute("SELECT COUNT(*) FROM dim_date").fetchone()[0] > 0:
         return
