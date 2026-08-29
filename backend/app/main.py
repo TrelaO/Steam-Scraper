@@ -126,7 +126,14 @@ def _load_dataframe(path: Path, fmt: str) -> pd.DataFrame:
         return _load_json_dataframe(path)
     if fmt == "xlsx":
         return pd.read_excel(path)
-    raise HTTPException(400, f"Unsupported format: {fmt}")
+    # Reached only from _run_etl_job (a background thread, not a request handler) -
+    # HTTPException has no HTTP response to attach to there, so a plain exception
+    # with a clear message is what actually surfaces to the job's error field.
+    raise ValueError(
+        f"'{fmt}' isn't a supported tabular format - the ETL pipeline loads data into "
+        "a pandas DataFrame (rows/columns), which csv, json, and xlsx have and this "
+        "doesn't. Upload one of those instead."
+    )
 
 
 MAX_CELL_CHARS = 100

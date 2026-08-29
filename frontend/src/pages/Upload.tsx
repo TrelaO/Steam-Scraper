@@ -2,6 +2,8 @@ import { useNavigate } from "react-router-dom";
 import { runEtl, uploadFile } from "../api/client";
 import { useUploadState } from "../uploadState";
 
+const TABULAR_FORMATS = new Set(["csv", "json", "xlsx"]);
+
 export default function Upload() {
   const { uploaded, setUploaded, busy, setBusy, error, setError } = useUploadState();
   const navigate = useNavigate();
@@ -34,6 +36,8 @@ export default function Upload() {
     }
   }
 
+  const isTabular = uploaded ? TABULAR_FORMATS.has(uploaded.detected_format) : true;
+
   return (
     <div className="page">
       <div className="page-header">
@@ -46,10 +50,11 @@ export default function Upload() {
           <span className="dropzone-title">
             {busy ? "Working..." : "Click to choose a file"}
           </span>
-          <span className="dropzone-hint">.csv, .json, or .xlsx</span>
+          <span className="dropzone-hint">
+            Any file type accepted — only csv, json, and xlsx can actually be processed
+          </span>
           <input
             type="file"
-            accept=".csv,.json,.xlsx"
             disabled={busy}
             onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
           />
@@ -58,11 +63,21 @@ export default function Upload() {
         {uploaded && (
           <div className="file-summary">
             <span className="file-summary-name">{uploaded.filename}</span>
-            <span className="badge badge-neutral">{uploaded.detected_format}</span>
+            <span className={`badge ${isTabular ? "badge-neutral" : "badge-warning"}`}>
+              {uploaded.detected_format}
+            </span>
             <button className="btn" onClick={handleRun} disabled={busy}>
               {busy ? "Running..." : "Generate & run ETL"}
             </button>
           </div>
+        )}
+
+        {uploaded && !isTabular && (
+          <p className="muted" style={{ marginTop: 10 }}>
+            "{uploaded.detected_format}" isn't tabular data (no rows/columns) — the ETL run
+            will fail cleanly with an explanation if you continue, since there's nothing to
+            map into the warehouse schema.
+          </p>
         )}
 
         {error && <div className="error-box">{error}</div>}

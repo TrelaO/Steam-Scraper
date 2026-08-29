@@ -29,10 +29,27 @@ def _content_matches(fmt: str, content: bytes) -> bool:
         return False
 
 
+# Magic-byte signatures for common formats we deliberately do NOT support for ETL
+# (no tabular structure to load into a DataFrame). Detected purely so the upload
+# honestly reports what the file actually is ("detected as jpg") instead of
+# silently mislabeling it "csv" and failing later with a confusing binary-parse
+# error - see _load_dataframe's rejection message for where that surfaces.
+_KNOWN_UNSUPPORTED_SIGNATURES: list[tuple[bytes, str]] = [
+    (b"%PDF", "pdf"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+]
+
+
 def _detect_by_content(content: bytes) -> str:
     if content[:4] == b"PK\x03\x04":
         return "xlsx"
     stripped = content.lstrip()
     if stripped[:1] in (b"{", b"["):
         return "json"
+    for signature, fmt in _KNOWN_UNSUPPORTED_SIGNATURES:
+        if content.startswith(signature):
+            return fmt
     return "csv"
