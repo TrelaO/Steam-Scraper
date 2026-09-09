@@ -196,6 +196,25 @@ export function getGeminiUsage(): Promise<GeminiUsage> {
   return fetch(`${API_BASE}/gemini-usage`).then(handle<GeminiUsage>);
 }
 
+export interface FormatError {
+  type: string;
+  count: number;
+}
+
+export interface FormatStats {
+  runs: number;
+  successes: number;
+  success_rate: number | null;
+  avg_attempts: number | null;
+  top_errors: FormatError[];
+}
+
+export type FormatComparison = Record<string, FormatStats>;
+
+export function getFormatComparison(): Promise<FormatComparison> {
+  return fetch(`${API_BASE}/etl/format-comparison`).then(handle<FormatComparison>);
+}
+
 export interface ApiKeyStatus {
   source: "override" | "env" | "none";
   masked: string | null;

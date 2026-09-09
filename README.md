@@ -113,6 +113,10 @@ Endpointy (wszystkie pod `/api`):
 - `GET /api/analytics/dss` — reguły wspomagania decyzji: gry-kandydaci do przeceny
   (dobrze oceniane, bez aktywnego rabatu, cena powyżej średniej) i gry-kandydaci do
   korekty ceny (słabo oceniane, ta sama reszta warunków)
+- `GET /api/etl/format-comparison` — właściwe porównanie badawcze: jak LLM radzi sobie
+  z generowaniem ETL osobno dla CSV/JSON/XLSX (liczba prób, success rate, najczęstsze
+  błędy), agregowane z `generated_etl/` + historii jobów — widoczne też na stronie
+  `Upload`
 - `GET /api/schema` — metadane schematu gwiazdy (kolumny, klucze, liczba wierszy na żywo)
 - `POST /api/sql/query` — konsola SQL tylko do odczytu (SELECT/WITH/EXPLAIN), limit
   500 wierszy i 20s na zapytanie — patrz [backend/app/sql_console.py](backend/app/sql_console.py)
@@ -165,6 +169,25 @@ nic realnie nie przerywa) została też znaleziona i naprawiona w konsoli SQL
 Pliki źródłowe wgrywa się przez `/upload`; nie są commitowane (`backend/landing/`
 zignorowane w git). Wygenerowany kod ETL per format w `backend/generated_etl/` JEST
 commitowany jako artefakt badawczy do porównania między formatami.
+
+## Testy
+
+```bash
+cd backend
+pip install -r ../requirements.txt   # zawiera pytest
+pytest
+```
+
+Pokrywają deterministyczne części niezależne od LLM/klucza API: wykrywanie formatu
+([backend/app/format_detector.py](backend/app/format_detector.py)), walidację
+konsoli SQL tylko-do-odczytu i jej faktyczne działanie timeoutu
+([backend/app/sql_console.py](backend/app/sql_console.py)), DDL/migrację schematu
+i regułę usuwania niekompletnych gier ([backend/app/db.py](backend/app/db.py)),
+reguły DSS ([backend/app/analytics_queries.py](backend/app/analytics_queries.py))
+oraz agregację porównania formatów
+([backend/app/pipeline_stats.py](backend/app/pipeline_stats.py)). Nie wymagają
+`GEMINI_API_KEY` ani sieci — `backend/app/llm_etl_generator.py` (właściwe wywołania
+Gemini) celowo zostaje poza zakresem testów jednostkowych.
 
 ## Otwarte pytania
 

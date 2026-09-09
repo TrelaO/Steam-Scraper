@@ -18,7 +18,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("steam_etl.main")
 
-from . import analytics_queries, api_key_store, db, etl_runner, quota_guard, sql_console  # noqa: E402  (needs load_dotenv() first)
+from . import analytics_queries, api_key_store, db, etl_runner, pipeline_stats, quota_guard, sql_console  # noqa: E402  (needs load_dotenv() first)
 from .format_detector import detect_format  # noqa: E402
 from .models import ApiKeyRequest, ETLJobStatus, SqlQueryRequest, UploadResponse  # noqa: E402
 
@@ -263,6 +263,14 @@ def etl_status(job_id: str):
     if job is None:
         raise HTTPException(404, "Unknown job_id")
     return job
+
+
+@api.get("/etl/format-comparison")
+def etl_format_comparison():
+    """Per-source-format stats on how the LLM's ETL generation has actually gone
+    across every run archived in generated_etl/ - the comparison the project is
+    nominally about (see pipeline_stats.format_comparison)."""
+    return pipeline_stats.format_comparison(GENERATED_ETL_DIR, _jobs)
 
 
 @api.get("/games")

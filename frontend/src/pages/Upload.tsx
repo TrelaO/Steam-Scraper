@@ -1,8 +1,76 @@
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { runEtl, uploadFile } from "../api/client";
+import { FormatComparison, getFormatComparison, runEtl, uploadFile } from "../api/client";
 import { useUploadState } from "../uploadState";
 
 const TABULAR_FORMATS = new Set(["csv", "json", "xlsx"]);
+const FORMAT_ORDER = ["csv", "json", "xlsx"];
+
+function FormatComparisonCard() {
+  const [comparison, setComparison] = useState<FormatComparison | null>(null);
+
+  useEffect(() => {
+    getFormatComparison()
+      .then(setComparison)
+      .catch(() => {
+        /* non-fatal - this card is meta-info about past runs, not core functionality */
+      });
+  }, []);
+
+  const formats = comparison
+    ? FORMAT_ORDER.filter((f) => f in comparison).concat(
+        Object.keys(comparison).filter((f) => !FORMAT_ORDER.includes(f))
+      )
+    : [];
+
+  if (!comparison || formats.length === 0) return null;
+
+  return (
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>How the LLM has done, by format</h2>
+      <p className="muted" style={{ marginTop: -6, marginBottom: 14 }}>
+        The same Steam dataset in different shapes tends to produce different generated code —
+        this is the actual comparison the project is about, aggregated from every run archived
+        in <code>generated_etl/</code>.
+      </p>
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Format</th>
+              <th>Runs</th>
+              <th>Success rate</th>
+              <th>Avg. attempts</th>
+              <th>Most common failures</th>
+            </tr>
+          </thead>
+          <tbody>
+            {formats.map((fmt) => {
+              const s = comparison[fmt];
+              return (
+                <tr key={fmt}>
+                  <td>{fmt}</td>
+                  <td className="numeric">{s.runs}</td>
+                  <td className="numeric">
+                    {s.success_rate === null ? "—" : `${s.success_rate.toFixed(0)}%`}
+                  </td>
+                  <td className="numeric">
+                    {s.avg_attempts === null ? "—" : s.avg_attempts.toFixed(1)}
+                  </td>
+                  <td>
+                    {s.top_errors.length === 0
+                      ? "—"
+                      : s.top_errors.map((e) => `${e.type} (${e.count})`).join(", ")}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 export default function Upload() {
   const { uploaded, setUploaded, busy, setBusy, error, setError } = useUploadState();
@@ -82,6 +150,8 @@ export default function Upload() {
 
         {error && <div className="error-box">{error}</div>}
       </div>
+
+      <FormatComparisonCard />
     </div>
   );
 }

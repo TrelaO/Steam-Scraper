@@ -6,3 +6,6 @@ pandas>=2.2
 openpyxl>=3.1
 google-genai>=0.3
 python-multipart>=0.0.9
+
+# Tests only (backend/tests/) - not needed to run the app itself
+pytest>=8.0
