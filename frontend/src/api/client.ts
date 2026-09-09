@@ -108,6 +108,39 @@ export function getSummaryStats(): Promise<SummaryStats> {
   return fetch(`${API_BASE}/analytics/summary`).then(handle<SummaryStats>);
 }
 
+export interface SchemaColumn {
+  name: string;
+  type: string;
+  key: string;
+}
+
+export interface SchemaTable {
+  name: string;
+  kind: "dimension" | "fact" | "bridge";
+  columns: SchemaColumn[];
+  row_count: number;
+}
+
+export function getSchema(): Promise<SchemaTable[]> {
+  return fetch(`${API_BASE}/schema`).then(handle<SchemaTable[]>);
+}
+
+export interface SqlQueryResult {
+  columns: string[];
+  rows: (string | number | null)[][];
+  row_count: number;
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
+export function runSqlQuery(sql: string): Promise<SqlQueryResult> {
+  return fetch(`${API_BASE}/sql/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql }),
+  }).then(handle<SqlQueryResult>);
+}
+
 export interface PriceHistoryPoint {
   price_usd: number;
   discount_pct: number | null;

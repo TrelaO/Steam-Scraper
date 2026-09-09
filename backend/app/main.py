@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
@@ -17,9 +18,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("steam_etl.main")
 
-from . import analytics_queries, db, etl_runner, quota_guard  # noqa: E402  (needs load_dotenv() first)
+from . import analytics_queries, db, etl_runner, quota_guard, sql_console  # noqa: E402  (needs load_dotenv() first)
 from .format_detector import detect_format  # noqa: E402
-from .models import ETLJobStatus, UploadResponse  # noqa: E402
+from .models import ETLJobStatus, SqlQueryRequest, UploadResponse  # noqa: E402
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = APP_ROOT.parent
@@ -306,6 +307,28 @@ def analytics_summary():
     conn = db.get_connection()
     try:
         return analytics_queries.summary_stats(conn)
+    finally:
+        conn.close()
+
+
+@api.get("/schema")
+def get_schema():
+    conn = db.get_connection()
+    try:
+        return db.get_schema_info(conn)
+    finally:
+        conn.close()
+
+
+@api.post("/sql/query")
+def run_sql_query(payload: SqlQueryRequest):
+    conn = db.get_connection()
+    try:
+        return sql_console.run_readonly_query(conn, payload.sql)
+    except sql_console.QueryError as exc:
+        raise HTTPException(400, str(exc))
+    except sqlite3.Error as exc:
+        raise HTTPException(400, f"{exc.__class__.__name__}: {exc}")
     finally:
         conn.close()
 

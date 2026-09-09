@@ -4,6 +4,7 @@ import { getGeminiUsage, GeminiUsage } from "./api/client";
 import Dashboard from "./pages/Dashboard";
 import PipelineRun from "./pages/PipelineRun";
 import Upload from "./pages/Upload";
+import Warehouse from "./pages/Warehouse";
 import { applyTheme, getStoredTheme, getSystemTheme, Theme } from "./theme";
 import { UploadStateProvider } from "./uploadState";
 
@@ -58,6 +59,9 @@ export default function App() {
           <NavLink to="/dashboard" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
             Dashboard
           </NavLink>
+          <NavLink to="/warehouse" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
+            Warehouse
+          </NavLink>
         </div>
         <span className="navbar-spacer" />
         <GeminiUsageBadge />
@@ -76,6 +80,7 @@ export default function App() {
             <Route path="/" element={<Upload />} />
             <Route path="/pipeline/:jobId" element={<PipelineRun />} />
             <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/warehouse" element={<Warehouse />} />
           </Routes>
         </UploadStateProvider>
       </main>

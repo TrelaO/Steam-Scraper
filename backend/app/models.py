@@ -25,3 +25,7 @@ class ETLJobStatus(BaseModel):
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     current_step: Optional[str] = None
+
+
+class SqlQueryRequest(BaseModel):
+    sql: str

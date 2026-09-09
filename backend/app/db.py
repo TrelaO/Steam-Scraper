@@ -80,6 +80,91 @@ def get_ddl_text() -> str:
     return "\n".join(stmt.strip() + ";" for stmt in DDL_STATEMENTS)
 
 
+# Structured mirror of the DDL above, for the schema browser UI. Kept as data (not
+# parsed out of the DDL strings) so it's simple and can't silently drift out of sync
+# with the actual CREATE TABLE statements without someone noticing in review.
+SCHEMA_INFO: list[dict] = [
+    {
+        "name": "dim_date",
+        "kind": "dimension",
+        "columns": [
+            {"name": "date_sk", "type": "INT", "key": "PK"},
+            {"name": "full_date", "type": "DATE", "key": ""},
+            {"name": "year", "type": "INT", "key": ""},
+            {"name": "month", "type": "INT", "key": ""},
+            {"name": "quarter", "type": "INT", "key": ""},
+        ],
+    },
+    {
+        "name": "dim_platform",
+        "kind": "dimension",
+        "columns": [
+            {"name": "platform_sk", "type": "INTEGER", "key": "PK"},
+            {"name": "supports_windows", "type": "BOOLEAN", "key": ""},
+            {"name": "supports_mac", "type": "BOOLEAN", "key": ""},
+            {"name": "supports_linux", "type": "BOOLEAN", "key": ""},
+            {"name": "platform_combo", "type": "VARCHAR(50)", "key": ""},
+        ],
+    },
+    {
+        "name": "dim_game",
+        "kind": "dimension",
+        "columns": [
+            {"name": "game_sk", "type": "INTEGER", "key": "PK"},
+            {"name": "app_id", "type": "VARCHAR(50)", "key": "UNIQUE"},
+            {"name": "game_name", "type": "VARCHAR(255)", "key": ""},
+            {"name": "required_age", "type": "INT", "key": ""},
+            {"name": "release_date", "type": "DATE", "key": ""},
+            {"name": "estimated_owners", "type": "VARCHAR(50)", "key": ""},
+            {"name": "owners_min", "type": "INT", "key": ""},
+            {"name": "owners_max", "type": "INT", "key": ""},
+        ],
+    },
+    {
+        "name": "dim_genre",
+        "kind": "dimension",
+        "columns": [
+            {"name": "genre_sk", "type": "INTEGER", "key": "PK"},
+            {"name": "genre_name", "type": "VARCHAR(100)", "key": "UNIQUE"},
+        ],
+    },
+    {
+        "name": "bridge_game_genre",
+        "kind": "bridge",
+        "columns": [
+            {"name": "game_sk", "type": "INT", "key": "PK, FK → dim_game.game_sk"},
+            {"name": "genre_sk", "type": "INT", "key": "PK, FK → dim_genre.genre_sk"},
+        ],
+    },
+    {
+        "name": "fact_game",
+        "kind": "fact",
+        "columns": [
+            {"name": "fact_sk", "type": "INTEGER", "key": "PK"},
+            {"name": "game_sk", "type": "INT", "key": "FK → dim_game.game_sk"},
+            {"name": "date_sk", "type": "INT", "key": "FK → dim_date.date_sk"},
+            {"name": "platform_sk", "type": "INT", "key": "FK → dim_platform.platform_sk"},
+            {"name": "price_usd", "type": "DECIMAL(10,2)", "key": ""},
+            {"name": "discount_pct", "type": "INT", "key": ""},
+            {"name": "peak_ccu", "type": "INT", "key": ""},
+            {"name": "positive_reviews", "type": "INT", "key": ""},
+            {"name": "negative_reviews", "type": "INT", "key": ""},
+            {"name": "average_playtime_mins", "type": "INT", "key": ""},
+            {"name": "", "type": "", "key": "UNIQUE (game_sk, date_sk, platform_sk)"},
+        ],
+    },
+]
+
+
+def get_schema_info(conn: sqlite3.Connection) -> list[dict]:
+    """SCHEMA_INFO plus a live row count per table, for the schema browser UI."""
+    result = []
+    for table in SCHEMA_INFO:
+        count = conn.execute(f"SELECT COUNT(*) FROM {table['name']}").fetchone()[0]
+        result.append({**table, "row_count": count})
+    return result
+
+
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: the connection is opened on the request thread but the
