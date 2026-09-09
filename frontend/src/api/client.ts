@@ -15,6 +15,12 @@ export interface ETLAttemptLog {
   code?: string;
 }
 
+export interface FieldMapping {
+  source: string;
+  target: string;
+  note: string;
+}
+
 export interface ETLJobStatus {
   job_id: string;
   file_id: string;
@@ -24,6 +30,7 @@ export interface ETLJobStatus {
   result?: Record<string, unknown>;
   error?: string;
   current_step?: string;
+  mapping?: FieldMapping[];
 }
 
 export interface GameRow {
@@ -108,6 +115,26 @@ export function getSummaryStats(): Promise<SummaryStats> {
   return fetch(`${API_BASE}/analytics/summary`).then(handle<SummaryStats>);
 }
 
+export interface DssCandidate {
+  app_id: string;
+  game_name: string | null;
+  price_usd: number;
+  discount_pct: number | null;
+  peak_ccu: number | null;
+  positive_reviews: number | null;
+  negative_reviews: number | null;
+  review_score: number | null;
+}
+
+export interface DssSignals {
+  discount_candidates: DssCandidate[];
+  reprice_candidates: DssCandidate[];
+}
+
+export function getDssSignals(): Promise<DssSignals> {
+  return fetch(`${API_BASE}/analytics/dss`).then(handle<DssSignals>);
+}
+
 export interface SchemaColumn {
   name: string;
   type: string;
@@ -167,4 +194,25 @@ export interface GeminiUsage {
 
 export function getGeminiUsage(): Promise<GeminiUsage> {
   return fetch(`${API_BASE}/gemini-usage`).then(handle<GeminiUsage>);
+}
+
+export interface ApiKeyStatus {
+  source: "override" | "env" | "none";
+  masked: string | null;
+}
+
+export function getApiKeyStatus(): Promise<ApiKeyStatus> {
+  return fetch(`${API_BASE}/settings/api-key`).then(handle<ApiKeyStatus>);
+}
+
+export function setApiKey(apiKey: string): Promise<ApiKeyStatus> {
+  return fetch(`${API_BASE}/settings/api-key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  }).then(handle<ApiKeyStatus>);
+}
+
+export function clearApiKey(): Promise<ApiKeyStatus> {
+  return fetch(`${API_BASE}/settings/api-key`, { method: "DELETE" }).then(handle<ApiKeyStatus>);
 }

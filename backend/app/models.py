@@ -25,7 +25,12 @@ class ETLJobStatus(BaseModel):
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     current_step: Optional[str] = None
+    mapping: Optional[list[dict[str, str]]] = None
 
 
 class SqlQueryRequest(BaseModel):
     sql: str
+
+
+class ApiKeyRequest(BaseModel):
+    api_key: str

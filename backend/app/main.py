@@ -18,9 +18,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("steam_etl.main")
 
-from . import analytics_queries, db, etl_runner, quota_guard, sql_console  # noqa: E402  (needs load_dotenv() first)
+from . import analytics_queries, api_key_store, db, etl_runner, quota_guard, sql_console  # noqa: E402  (needs load_dotenv() first)
 from .format_detector import detect_format  # noqa: E402
-from .models import ETLJobStatus, SqlQueryRequest, UploadResponse  # noqa: E402
+from .models import ApiKeyRequest, ETLJobStatus, SqlQueryRequest, UploadResponse  # noqa: E402
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = APP_ROOT.parent
@@ -193,29 +193,29 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
         df = _load_dataframe(meta["path"], meta["format"])
         sample = _build_sample(df)
 
-        conn = db.get_connection()
-        try:
-            outcome = etl_runner.run_etl_with_retries(
-                file_format=meta["format"],
-                df=df,
-                conn=conn,
-                ddl=db.get_ddl_text(),
-                sample=sample,
-                on_progress=report_progress,
-                on_step=report_step,
-            )
-            if outcome["status"] == "success":
-                conn.commit()
+        outcome = etl_runner.run_etl_with_retries(
+            file_format=meta["format"],
+            df=df,
+            ddl=db.get_ddl_text(),
+            sample=sample,
+            on_progress=report_progress,
+            on_step=report_step,
+        )
+        if outcome["status"] == "success":
+            # The generated code now runs (and commits) inside its own subprocess and
+            # connection - see etl_runner._child_entry - so its writes are already
+            # durable on disk by the time we get here. This connection is only for
+            # the cleanup pass below, not the ETL transaction itself.
+            conn = db.get_connection()
+            try:
                 report_step("Removing games with any missing field...")
                 removed = db.remove_incomplete_games(conn)
                 if any(removed.values()):
                     logger.info("Removed incomplete games after job %s: %s", job_id, removed)
                     if outcome.get("result"):
                         outcome["result"]["removed_incomplete"] = removed["dim_game"]
-            else:
-                conn.rollback()
-        finally:
-            conn.close()
+            finally:
+                conn.close()
 
         if outcome.get("code"):
             artifact_path = GENERATED_ETL_DIR / f"{meta['format']}_{job_id}.py"
@@ -229,6 +229,7 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
             logs=outcome.get("logs", []),
             result=outcome.get("result"),
             error=outcome.get("error"),
+            mapping=outcome.get("mapping"),
         ))
     except Exception as exc:  # keeps a crash in the background thread from vanishing silently
         logger.exception("ETL job %s crashed", job_id)
@@ -311,6 +312,22 @@ def analytics_summary():
         conn.close()
 
 
+@api.get("/analytics/dss")
+def analytics_dss():
+    """Rule-based decision-support signals (not just descriptive analytics): games
+    worth discounting given their reception, and games whose price may need
+    correcting given theirs. See analytics_queries.discount_opportunities /
+    reprice_flags for the actual thresholds."""
+    conn = db.get_connection()
+    try:
+        return {
+            "discount_candidates": analytics_queries.discount_opportunities(conn),
+            "reprice_candidates": analytics_queries.reprice_flags(conn),
+        }
+    finally:
+        conn.close()
+
+
 @api.get("/schema")
 def get_schema():
     conn = db.get_connection()
@@ -343,6 +360,26 @@ def clear_warehouse():
 @api.get("/gemini-usage")
 def gemini_usage():
     return quota_guard.get_usage()
+
+
+@api.get("/settings/api-key")
+def get_api_key_status():
+    return api_key_store.get_status()
+
+
+@api.post("/settings/api-key")
+def set_api_key(payload: ApiKeyRequest):
+    try:
+        api_key_store.set_api_key(payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return api_key_store.get_status()
+
+
+@api.delete("/settings/api-key")
+def clear_api_key():
+    api_key_store.clear_api_key()
+    return api_key_store.get_status()
 
 
 app.include_router(api)

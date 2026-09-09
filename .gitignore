@@ -227,6 +227,7 @@ backend/data/*.db-wal
 backend/data/*.db-shm
 backend/data/gemini_usage.json
 backend/data/jobs.json
+backend/data/api_key_override.json
 backend/landing/*
 !backend/landing/.gitkeep
 

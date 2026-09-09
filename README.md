@@ -11,6 +11,61 @@ Schemat gwiazdy w SQLite: `dim_date`, `dim_platform`, `dim_game`, `dim_genre`
 (+ `bridge_game_genre`) jako wymiary, `fact_game` jako tabela faktów. DDL i seedy
 (`dim_date`, `dim_platform`) w [backend/app/db.py](backend/app/db.py).
 
+```mermaid
+erDiagram
+    dim_game ||--o{ fact_game : game_sk
+    dim_date ||--o{ fact_game : date_sk
+    dim_platform ||--o{ fact_game : platform_sk
+    dim_game ||--o{ bridge_game_genre : game_sk
+    dim_genre ||--o{ bridge_game_genre : genre_sk
+
+    dim_game {
+        INTEGER game_sk PK
+        VARCHAR app_id UK
+        VARCHAR game_name
+        INT required_age
+        DATE release_date
+        VARCHAR estimated_owners
+    }
+    dim_date {
+        INT date_sk PK
+        DATE full_date
+        INT year
+        INT month
+        INT quarter
+    }
+    dim_platform {
+        INTEGER platform_sk PK
+        BOOLEAN supports_windows
+        BOOLEAN supports_mac
+        BOOLEAN supports_linux
+        VARCHAR platform_combo
+    }
+    dim_genre {
+        INTEGER genre_sk PK
+        VARCHAR genre_name UK
+    }
+    bridge_game_genre {
+        INT game_sk PK_FK
+        INT genre_sk PK_FK
+    }
+    fact_game {
+        INTEGER fact_sk PK
+        INT game_sk FK
+        INT date_sk FK
+        INT platform_sk FK
+        DECIMAL price_usd
+        INT discount_pct
+        INT peak_ccu
+        INT positive_reviews
+        INT negative_reviews
+        INT average_playtime_mins
+    }
+```
+
+Ten sam diagram (plus statystyki liczby wierszy na żywo) jest też renderowany w
+aplikacji na stronie `Warehouse` — patrz niżej.
+
 ## Uruchomienie — Docker (zalecane, jeden port, bez instalowania Pythona/Node)
 
 Wymaga tylko [Docker Desktop](https://www.docker.com/products/docker-desktop/). FastAPI
@@ -55,6 +110,12 @@ Endpointy (wszystkie pod `/api`):
 - `GET /api/etl/status/{job_id}` — status/logi/kod danego uruchomienia
 - `GET /api/games` — zawartość hurtowni: `fact_game` spłaszczone z jego wymiarami
   (nazwa gry, gatunki, platforma, cena, itd.), pod dashboard
+- `GET /api/analytics/dss` — reguły wspomagania decyzji: gry-kandydaci do przeceny
+  (dobrze oceniane, bez aktywnego rabatu, cena powyżej średniej) i gry-kandydaci do
+  korekty ceny (słabo oceniane, ta sama reszta warunków)
+- `GET /api/schema` — metadane schematu gwiazdy (kolumny, klucze, liczba wierszy na żywo)
+- `POST /api/sql/query` — konsola SQL tylko do odczytu (SELECT/WITH/EXPLAIN), limit
+  500 wierszy i 20s na zapytanie — patrz [backend/app/sql_console.py](backend/app/sql_console.py)
 
 ### Frontend (React + Vite + TS)
 
@@ -70,8 +131,10 @@ Dev server na `:5173` proxuje `/api` do backendu na `:8000` (patrz
 [frontend/vite.config.ts](frontend/vite.config.ts)) — backend musi wtedy działać osobno.
 
 Strony: `Upload` (drag&drop + wykryty format), `PipelineRun` (wygenerowany kod + logi
-wykonania), `Dashboard` (tabela z zawartością hurtowni — filtrowanie i sortowanie po
-kolumnach).
+wykonania + podsumowanie mapowania pól od LLM), `Dashboard` (KPI, sygnały DSS, trend
+cen po roczniku, tabela z zawartością hurtowni — filtrowanie i sortowanie po
+kolumnach), `Warehouse` (diagram schematu gwiazdy z liczbą wierszy na żywo + konsola
+SQL tylko do odczytu z presetami, historią i eksportem CSV).
 
 ## Dane wejściowe
 
@@ -85,12 +148,19 @@ i wgraj `games.csv` / `games.json` przez stronę Upload w aplikacji — każdy o
 żeby porównać jak LLM radzi sobie z każdym formatem.
 
 **Uwaga na rozmiar.** Pełny zbiór to ~400 MB (CSV) / ~930 MB (JSON), ~100k+ gier.
-Sandbox wykonujący wygenerowany kod ma limit 30s (`EXEC_TIMEOUT_SECONDS` w
-[backend/app/etl_runner.py](backend/app/etl_runner.py)), a kod od LLM prawie zawsze
-iteruje wiersz po wierszu — przy takiej skali każda próba skończy się timeoutem,
-paląc dzienny limit zapytań do Gemini bez żadnego efektu. Do testów pipeline'u wytnij
-najpierw mniejszą próbkę wierszy (np. `head -300 games.csv > games_sample.csv` w
-PowerShell/bash, lub `df.head(300)` w pandas) i wgrywaj tę próbkę zamiast pełnego pliku.
+Wygenerowany kod wykonuje się w osobnym procesie (nie wątku — patrz niżej) z limitem
+90s (`EXEC_TIMEOUT_SECONDS` w [backend/app/etl_runner.py](backend/app/etl_runner.py)),
+a kod od LLM prawie zawsze iteruje wiersz po wierszu — przy dużej skali każda próba
+może skończyć się timeoutem, paląc dzienny limit zapytań do Gemini bez żadnego efektu.
+Do testów pipeline'u wytnij najpierw mniejszą próbkę wierszy (np.
+`head -300 games.csv > games_sample.csv` w PowerShell/bash, lub `df.head(300)` w
+pandas) i wgrywaj tę próbkę zamiast pełnego pliku.
+
+Wykonanie kodu ETL działa jako osobny proces (`multiprocessing`, spawn), nie wątek —
+przekroczenie limitu czasu faktycznie zabija proces (`process.terminate()`/`kill()`),
+zamiast zostawiać go działającym w tle. Ta sama klasa problemu (wątek + timeout, który
+nic realnie nie przerywa) została też znaleziona i naprawiona w konsoli SQL
+([backend/app/sql_console.py](backend/app/sql_console.py), przez `conn.interrupt()`).
 
 Pliki źródłowe wgrywa się przez `/upload`; nie są commitowane (`backend/landing/`
 zignorowane w git). Wygenerowany kod ETL per format w `backend/generated_etl/` JEST

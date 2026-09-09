@@ -174,6 +174,54 @@ def summary_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+_DSS_REVIEW_SCORE = (
+    "100.0 * f.positive_reviews / NULLIF(f.positive_reviews + f.negative_reviews, 0)"
+)
+# A review count floor so a single 5-star rating doesn't outrank a game with a real,
+# stable reputation - both DSS lists below require this.
+_DSS_MIN_REVIEWS = 50
+
+
+def discount_opportunities(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    """Rule-based DSS signal: well-reviewed games priced above the warehouse average
+    with no discount currently active - candidates where a discount is likely to
+    convert strong reception into sales. Ranked by peak concurrent users (visibility)."""
+    query = f"""
+        SELECT
+            dg.app_id, dg.game_name, f.price_usd, f.discount_pct, f.peak_ccu,
+            f.positive_reviews, f.negative_reviews, {_DSS_REVIEW_SCORE} AS review_score
+        {_BASE_FROM}
+        WHERE f.price_usd IS NOT NULL
+          AND f.price_usd > (SELECT AVG(price_usd) FROM fact_game WHERE price_usd IS NOT NULL)
+          AND (f.discount_pct IS NULL OR f.discount_pct = 0)
+          AND (f.positive_reviews + f.negative_reviews) >= {_DSS_MIN_REVIEWS}
+          AND {_DSS_REVIEW_SCORE} >= 75
+        ORDER BY f.peak_ccu DESC
+        LIMIT ?
+    """
+    return _rows_as_dicts(conn, query, (limit,))
+
+
+def reprice_flags(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    """Rule-based DSS signal: poorly-reviewed games priced above the warehouse average
+    with no discount currently active - candidates for a price correction rather than
+    a discount, since the underlying reception is weak. Ranked by review volume."""
+    query = f"""
+        SELECT
+            dg.app_id, dg.game_name, f.price_usd, f.discount_pct, f.peak_ccu,
+            f.positive_reviews, f.negative_reviews, {_DSS_REVIEW_SCORE} AS review_score
+        {_BASE_FROM}
+        WHERE f.price_usd IS NOT NULL
+          AND f.price_usd > (SELECT AVG(price_usd) FROM fact_game WHERE price_usd IS NOT NULL)
+          AND (f.discount_pct IS NULL OR f.discount_pct = 0)
+          AND (f.positive_reviews + f.negative_reviews) >= {_DSS_MIN_REVIEWS}
+          AND {_DSS_REVIEW_SCORE} < 50
+        ORDER BY (f.positive_reviews + f.negative_reviews) DESC
+        LIMIT ?
+    """
+    return _rows_as_dicts(conn, query, (limit,))
+
+
 def price_history_for_game(conn: sqlite3.Connection, app_id: str) -> list[dict]:
     query = f"""
         SELECT f.price_usd, f.discount_pct, p.platform_combo, d.full_date AS snapshot_date

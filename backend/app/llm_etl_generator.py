@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -6,7 +7,7 @@ import time
 from google import genai
 from google.genai import errors as genai_errors
 
-from . import quota_guard
+from . import api_key_store, quota_guard
 
 logger = logging.getLogger("steam_etl.llm_etl_generator")
 
@@ -24,6 +25,22 @@ MAX_AUTO_RETRY_DELAY_SECONDS = 90
 class QuotaExceededError(RuntimeError):
     """Raised when the Gemini API rejects a call for exceeding a rate/quota limit.
     Distinct from other failures because retrying with corrected code can't fix it."""
+
+
+class MissingApiKeyError(RuntimeError):
+    """Raised when no API key is available from either the Settings UI override or
+    .env's GEMINI_API_KEY."""
+
+
+def _get_client() -> genai.Client:
+    api_key = api_key_store.get_api_key()
+    if not api_key:
+        raise MissingApiKeyError(
+            "No API key configured - set one in the app (⚙ Settings) or as "
+            "GEMINI_API_KEY in .env."
+        )
+    return genai.Client(api_key=api_key)
+
 
 SYSTEM_PROMPT = """You are a data engineer writing a Python ETL transformation.
 
@@ -93,6 +110,51 @@ def _extract_code(text: str) -> str:
     return match.group(1).strip() if match else text.strip()
 
 
+def _extract_json_block(text: str) -> str:
+    # Deliberately separate from _extract_code: Gemini may fence a JSON response as
+    # ```json rather than ```python, which _extract_code's python-or-bare pattern
+    # would not strip (leaving a literal "json" token in front of the array).
+    match = re.search(r"```(?:\w+)?\s*(.*?)```", text, re.DOTALL)
+    return match.group(1).strip() if match else text.strip()
+
+
+MAPPING_PROMPT_TEMPLATE = """You just wrote the following Python ETL function, mapping a
+source dataset onto this SQLite star-schema warehouse:
+
+Target schema DDL:
+{ddl}
+
+Your function:
+{code}
+
+List every source-column-to-warehouse-column mapping this function actually performs, as
+a JSON array of objects with exactly these keys:
+- "source": the source column/field name, as it appears in the source data
+- "target": "table.column" in the warehouse this maps to
+- "note": one short sentence on any transformation/decision involved, or "" if it's a
+  direct copy
+
+Output ONLY the JSON array - no markdown fences, no explanation text outside the array.
+"""
+
+
+def explain_mapping(code: str, ddl: str) -> list[dict]:
+    """A second, cheap Gemini call asking the model to summarize, in structured form,
+    the column-mapping decisions the ETL code it just wrote actually makes - purely
+    for surfacing that reasoning in the UI (which column went where, and why), not
+    part of the code-generation/retry loop itself. Raises on any failure (quota,
+    network, malformed JSON); callers treat this as optional and catch accordingly."""
+    quota_guard.check_and_reserve()
+
+    client = _get_client()
+    prompt = MAPPING_PROMPT_TEMPLATE.format(ddl=ddl, code=code)
+    response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+    data = json.loads(_extract_json_block(response.text))
+    if not isinstance(data, list):
+        raise ValueError("Expected a JSON array from the mapping-summary prompt")
+    return data
+
+
 def _extract_retry_delay_seconds(exc: genai_errors.APIError) -> float | None:
     """Pulls the RetryInfo.retryDelay hint (e.g. "30.6s") out of a 429's error
     body, if present. Defensive: the exact shape isn't a stable contract, so any
@@ -118,7 +180,7 @@ def generate_etl_code(
 ) -> str:
     quota_guard.check_and_reserve()
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = _get_client()
     prompt = _build_prompt(file_format, ddl, sample, previous_code, previous_error)
     logger.info("Calling Gemini model=%s (prompt=%d chars)...", MODEL_NAME, len(prompt))
     started = time.monotonic()

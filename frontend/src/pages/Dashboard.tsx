@@ -13,7 +13,10 @@ import {
 } from "recharts";
 import {
   clearWarehouse,
+  DssCandidate,
+  DssSignals,
   GameRow,
+  getDssSignals,
   getGamePriceHistory,
   getPriceByYear,
   getSummaryStats,
@@ -80,6 +83,55 @@ function formatCell(key: SortKey, value: GameRow[SortKey]): string {
   if (key === "price_usd") return `$${Number(value).toFixed(2)}`;
   if (key === "discount_pct") return `${value}%`;
   return String(value);
+}
+
+function DssList({
+  title,
+  blurb,
+  candidates,
+  onSelect,
+}: {
+  title: string;
+  blurb: string;
+  candidates: DssCandidate[];
+  onSelect: (appId: string, name: string | null) => void;
+}) {
+  return (
+    <div>
+      <h3 style={{ margin: "0 0 4px", fontSize: "0.95rem" }}>{title}</h3>
+      <p className="muted" style={{ marginTop: 0, marginBottom: 10 }}>
+        {blurb}
+      </p>
+      {candidates.length === 0 ? (
+        <p className="muted">No games currently match this rule.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Game</th>
+                <th>Price (USD)</th>
+                <th>Review score</th>
+                <th>Peak CCU</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((c) => (
+                <tr key={c.app_id} onClick={() => onSelect(c.app_id, c.game_name)}>
+                  <td>{c.game_name ?? c.app_id}</td>
+                  <td className="numeric">${c.price_usd.toFixed(2)}</td>
+                  <td className="numeric">
+                    {c.review_score === null ? "—" : `${c.review_score.toFixed(0)}%`}
+                  </td>
+                  <td className="numeric">{c.peak_ccu?.toLocaleString() ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function HelpModal({ onClose }: { onClose: () => void }) {
@@ -187,6 +239,7 @@ export default function Dashboard() {
 
   const [yearCohorts, setYearCohorts] = useState<YearCohort[]>([]);
   const [summary, setSummary] = useState<SummaryStats | null>(null);
+  const [dss, setDss] = useState<DssSignals | null>(null);
 
   // Debounce the search box - it drives a server request, not a client-side filter,
   // so firing one per keystroke against a warehouse this size would be wasteful.
@@ -220,6 +273,11 @@ export default function Dashboard() {
       .catch(() => {
         /* same - non-fatal, the tile row just stays empty */
       });
+    getDssSignals()
+      .then(setDss)
+      .catch(() => {
+        /* same - non-fatal, the decision-support card just stays empty */
+      });
   }, []);
 
   async function handleClear() {
@@ -231,6 +289,7 @@ export default function Dashboard() {
       setTotal(0);
       setYearCohorts([]);
       setSummary(null);
+      setDss(null);
       setSelectedGame(null);
       setPriceHistory([]);
       setShowConfirmClear(false);
@@ -250,10 +309,10 @@ export default function Dashboard() {
     }
   }
 
-  function selectGame(row: GameRow) {
-    setSelectedGame({ appId: row.app_id, name: row.game_name });
+  function selectGame(appId: string, name: string | null) {
+    setSelectedGame({ appId, name });
     setPriceHistoryLoading(true);
-    getGamePriceHistory(row.app_id)
+    getGamePriceHistory(appId)
       .then(setPriceHistory)
       .catch((err) => setError((err as Error).message))
       .finally(() => setPriceHistoryLoading(false));
@@ -337,6 +396,33 @@ export default function Dashboard() {
                   <div className="result-tile-value">{summary.top_genre ?? "—"}</div>
                   <div className="result-tile-label">Most common genre</div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {dss && (dss.discount_candidates.length > 0 || dss.reprice_candidates.length > 0) && (
+            <div className="card">
+              <h2 style={{ marginTop: 0 }}>Decision support</h2>
+              <p className="muted">
+                Rule-based signals, not just descriptive stats: games priced above the
+                warehouse average with no discount currently active, split by whether their
+                review score suggests a discount would pay off or the price itself is the
+                problem. Both need at least 50 reviews to qualify. Click a row for its price
+                history.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 24 }}>
+                <DssList
+                  title="Discount candidates"
+                  blurb="Well-reviewed (≥75% positive) and undiscounted — a discount here is likely to convert reception into sales. Ranked by peak concurrent players."
+                  candidates={dss.discount_candidates}
+                  onSelect={selectGame}
+                />
+                <DssList
+                  title="Reprice candidates"
+                  blurb="Poorly-reviewed (<50% positive), priced above average, and undiscounted — the price itself looks like the problem, not the lack of a sale. Ranked by review volume."
+                  candidates={dss.reprice_candidates}
+                  onSelect={selectGame}
+                />
               </div>
             </div>
           )}
@@ -474,7 +560,7 @@ export default function Dashboard() {
                     <tr
                       key={`${row.app_id}-${row.platform_combo}-${row.snapshot_date}-${i}`}
                       className={row.app_id === selectedGame?.appId ? "selected" : ""}
-                      onClick={() => selectGame(row)}
+                      onClick={() => selectGame(row.app_id, row.game_name)}
                     >
                       {COLUMNS.map((col) => (
                         <td key={col.key} className={col.numeric ? "numeric" : ""}>

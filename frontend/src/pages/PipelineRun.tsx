@@ -101,6 +101,36 @@ export default function PipelineRun() {
           </>
         )}
 
+        {job.mapping && job.mapping.length > 0 && (
+          <>
+            <h2>Field mapping</h2>
+            <p className="muted" style={{ marginTop: -6 }}>
+              Gemini's own summary of the column mapping in the generated code below — asked
+              for separately, after the code ran successfully.
+            </p>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Source field</th>
+                    <th>Warehouse column</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {job.mapping.map((m, i) => (
+                    <tr key={i}>
+                      <td>{m.source}</td>
+                      <td>{m.target}</td>
+                      <td style={{ whiteSpace: "normal" }}>{m.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
         {job.generated_code && (
           <>
             <h2>Generated code (final attempt)</h2>

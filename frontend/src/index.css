@@ -634,6 +634,11 @@ code, pre {
   line-height: 1.5;
 }
 
+.schema-diagram {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
 .schema-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

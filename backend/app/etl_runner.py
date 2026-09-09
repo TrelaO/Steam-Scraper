@@ -1,8 +1,9 @@
 import builtins as _builtins_module
-import concurrent.futures
 import logging
+import multiprocessing as mp
 import sqlite3
 import traceback
+from queue import Empty as _QueueEmpty
 from typing import Callable
 
 import pandas as pd
@@ -40,6 +41,14 @@ _UNSAFE_BUILTIN_NAMES = frozenset({
     "setattr", "delattr", "memoryview",
 })
 
+# Generated code runs in a genuinely separate OS process (see _execute_once), spawned
+# rather than forked - this process also runs a multi-threaded FastAPI/uvicorn server
+# plus its own background threading.Thread per ETL job, and forking a multi-threaded
+# process only duplicates the forking thread, leaving any locks other threads held at
+# fork time in an unrecoverable state in the child. spawn starts a clean interpreter
+# instead, at the cost of re-importing this module and pickling the arguments.
+_MP_CONTEXT = mp.get_context("spawn")
+
 
 def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
     root = name.split(".")[0]
@@ -60,8 +69,8 @@ def _build_sandbox_globals(df: pd.DataFrame, conn: sqlite3.Connection) -> dict:
 
 def _format_generated_code_traceback(exc: BaseException) -> str:
     """Trims the traceback down to just the frames inside the generated code (the
-    exec'd string, filename '<string>'), dropping our own ThreadPoolExecutor/sandbox
-    plumbing - keeps retry prompts shorter and the signal focused on the LLM's own bug."""
+    exec'd string, filename '<string>'), dropping our own subprocess/sandbox plumbing
+    - keeps retry prompts shorter and the signal focused on the LLM's own bug."""
     frames = traceback.extract_tb(exc.__traceback__)
     user_frames = [f for f in frames if f.filename == "<string>"]
     lines = ["Traceback (most recent call last):\n"]
@@ -70,43 +79,88 @@ def _format_generated_code_traceback(exc: BaseException) -> str:
     return "".join(lines).strip()
 
 
+class _ChildExecutionError(RuntimeError):
+    """Carries a traceback already formatted inside the child process by
+    _format_generated_code_traceback - the original traceback object can't cross the
+    process boundary, so the formatted text is what's sent back on the result queue.
+    Callers should use str(exc) directly rather than re-formatting this one."""
+
+
+def _child_entry(code: str, df: pd.DataFrame, result_queue: "mp.Queue") -> None:
+    """Runs entirely inside the spawned child process: opens its OWN connection to
+    the warehouse (imported locally - this only ever runs in the child, and importing
+    here avoids any import-time coupling between etl_runner and db at module load),
+    execs the generated code, and commits or rolls back before exiting. Unlike the
+    previous thread-based version, the generated code no longer shares the caller's
+    connection/transaction - it must be self-contained, because if this process gets
+    killed for running past EXEC_TIMEOUT_SECONDS, nothing else survives it either."""
+    from . import db
+
+    conn = db.get_connection()
+    try:
+        sandbox = _build_sandbox_globals(df, conn)
+        exec(code, sandbox)
+        if "run_etl" not in sandbox:
+            raise RuntimeError("Generated code must define a run_etl(df, conn) function")
+        result = sandbox["run_etl"](df, conn)
+        conn.commit()
+        result_queue.put(("success", result))
+    except Exception as exc:
+        conn.rollback()
+        result_queue.put(("error", _format_generated_code_traceback(exc)))
+    finally:
+        conn.close()
+
+
 HEARTBEAT_INTERVAL_SECONDS = 4
 
 
 def _execute_once(
     code: str,
     df: pd.DataFrame,
-    conn: sqlite3.Connection,
     on_heartbeat: Callable[[int], None] | None = None,
 ) -> dict:
-    sandbox = _build_sandbox_globals(df, conn)
+    result_queue = _MP_CONTEXT.Queue()
+    process = _MP_CONTEXT.Process(target=_child_entry, args=(code, df, result_queue), daemon=True)
+    process.start()
 
-    def run():
-        exec(code, sandbox)
-        if "run_etl" not in sandbox:
-            raise RuntimeError("Generated code must define a run_etl(df, conn) function")
-        return sandbox["run_etl"](df, conn)
+    elapsed = 0
+    while True:
+        process.join(timeout=HEARTBEAT_INTERVAL_SECONDS)
+        if not process.is_alive():
+            break
+        elapsed += HEARTBEAT_INTERVAL_SECONDS
+        if elapsed >= EXEC_TIMEOUT_SECONDS:
+            # terminate() (SIGTERM) first, kill() (SIGKILL) only if it ignores that -
+            # this is what future.result(timeout=...) could never do to a thread: a
+            # hung/infinite-looping generated script is actually stopped, not just
+            # abandoned while it keeps running in the background.
+            process.terminate()
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            raise TimeoutError(f"Generated code did not finish within {EXEC_TIMEOUT_SECONDS}s")
+        if on_heartbeat:
+            on_heartbeat(elapsed)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(run)
-        elapsed = 0
-        while True:
-            try:
-                return future.result(timeout=HEARTBEAT_INTERVAL_SECONDS)
-            except concurrent.futures.TimeoutError:
-                elapsed += HEARTBEAT_INTERVAL_SECONDS
-                if elapsed >= EXEC_TIMEOUT_SECONDS:
-                    raise TimeoutError(
-                        f"Generated code did not finish within {EXEC_TIMEOUT_SECONDS}s"
-                    )
-                if on_heartbeat:
-                    on_heartbeat(elapsed)
+    try:
+        status, payload = result_queue.get(timeout=5)
+    except _QueueEmpty:
+        # The process exited without putting anything on the queue - a hard crash
+        # (segfault, OOM kill) rather than a normal Python exception reaching us.
+        raise RuntimeError(
+            f"Generated code's process exited unexpectedly (exit code {process.exitcode}) "
+            "without an error message - likely an out-of-memory kill on a large dataset."
+        )
+    if status == "error":
+        raise _ChildExecutionError(payload)
+    return payload
 
 
 def run_etl_with_retries(
     file_format: str,
     df: pd.DataFrame,
-    conn: sqlite3.Connection,
     ddl: str,
     sample: str,
     on_progress: Callable[[list[dict]], None] | None = None,
@@ -131,7 +185,7 @@ def run_etl_with_retries(
         step(f"Executing generated code, attempt {attempt}/{MAX_ATTEMPTS}...")
         try:
             result = _execute_once(
-                code, df.copy(), conn,
+                code, df,
                 on_heartbeat=lambda s, a=attempt: step(
                     f"Still executing, attempt {a}/{MAX_ATTEMPTS}... {s}s elapsed"
                 ),
@@ -140,9 +194,25 @@ def run_etl_with_retries(
             if on_progress:
                 on_progress(list(logs))
             step(f"Attempt {attempt} succeeded: {result}")
-            return {"status": "success", "code": code, "logs": logs, "result": result}
+
+            mapping = None
+            try:
+                step("Asking Gemini to summarize the field mapping it used...")
+                mapping = llm_etl_generator.explain_mapping(code, ddl)
+            except Exception as exc:
+                # Purely explanatory/enrichment info for the UI - a failure here
+                # (quota, malformed JSON, network) shouldn't fail an otherwise-
+                # successful ETL run.
+                logger.warning("Field-mapping summary failed (non-fatal): %s", exc)
+
+            return {
+                "status": "success", "code": code, "logs": logs, "result": result, "mapping": mapping,
+            }
         except Exception as exc:
-            error_text = _format_generated_code_traceback(exc)
+            error_text = (
+                str(exc) if isinstance(exc, _ChildExecutionError)
+                else _format_generated_code_traceback(exc)
+            )
             logs.append({"attempt": attempt, "status": "error", "error": error_text, "code": code})
             if on_progress:
                 on_progress(list(logs))
