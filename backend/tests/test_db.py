@@ -28,7 +28,7 @@ def test_get_schema_info_reflects_live_row_counts(conn):
     before = next(t for t in db.get_schema_info(conn) if t["name"] == "dim_genre")
     assert before["row_count"] == 0
 
-    conn.execute("INSERT INTO dim_genre (genre_name) VALUES ('Action')")
+    conn.execute("INSERT OR IGNORE INTO dim_genre (genre_name) VALUES ('Action')")
     conn.commit()
 
     after = next(t for t in db.get_schema_info(conn) if t["name"] == "dim_genre")
@@ -46,7 +46,7 @@ def _insert_complete_game(conn, app_id: str) -> int:
         (app_id,),
     )
     game_sk = conn.execute("SELECT game_sk FROM dim_game WHERE app_id = ?", (app_id,)).fetchone()[0]
-    conn.execute("INSERT INTO dim_genre (genre_name) VALUES ('Action')")
+    conn.execute("INSERT OR IGNORE INTO dim_genre (genre_name) VALUES ('Action')")
     genre_sk = conn.execute("SELECT genre_sk FROM dim_genre WHERE genre_name = 'Action'").fetchone()[0]
     conn.execute("INSERT OR IGNORE INTO bridge_game_genre (game_sk, genre_sk) VALUES (?, ?)", (game_sk, genre_sk))
     conn.execute(
@@ -71,6 +71,11 @@ def test_remove_incomplete_games_keeps_fully_populated_rows(conn):
 
 
 def test_remove_incomplete_games_removes_rows_with_a_null_field(conn):
+    # A companion fully-complete game keeps this batch from being "100% would be
+    # deleted" (which now short-circuits the cleanup entirely - see the dedicated
+    # skip-guard tests below), so this isolates the per-row removal behavior itself.
+    _insert_complete_game(conn, "companion-good")
+
     # Same shape as _insert_complete_game but price_usd left NULL - the ETL mapped
     # every OTHER field but this one, so the whole snapshot/game should be dropped.
     conn.execute(
@@ -81,7 +86,7 @@ def test_remove_incomplete_games_removes_rows_with_a_null_field(conn):
         """
     )
     game_sk = conn.execute("SELECT game_sk FROM dim_game WHERE app_id = 'incomplete-1'").fetchone()[0]
-    conn.execute("INSERT INTO dim_genre (genre_name) VALUES ('Action')")
+    conn.execute("INSERT OR IGNORE INTO dim_genre (genre_name) VALUES ('Action')")
     genre_sk = conn.execute("SELECT genre_sk FROM dim_genre WHERE genre_name = 'Action'").fetchone()[0]
     conn.execute("INSERT INTO bridge_game_genre (game_sk, genre_sk) VALUES (?, ?)", (game_sk, genre_sk))
     conn.execute(
@@ -98,10 +103,12 @@ def test_remove_incomplete_games_removes_rows_with_a_null_field(conn):
 
     assert removed["fact_game"] == 1
     assert removed["dim_game"] == 1
-    assert conn.execute("SELECT COUNT(*) FROM dim_game").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM dim_game").fetchone()[0] == 1  # only the companion survives
 
 
 def test_remove_incomplete_games_removes_games_with_no_genre(conn):
+    _insert_complete_game(conn, "companion-good")
+
     conn.execute(
         """
         INSERT INTO dim_game (app_id, game_name, required_age, release_date,
@@ -123,6 +130,80 @@ def test_remove_incomplete_games_removes_games_with_no_genre(conn):
     removed = db.remove_incomplete_games(conn)
 
     assert removed["dim_game"] == 1
+
+
+def test_remove_incomplete_games_does_not_require_discount_pct_or_peak_ccu(conn):
+    # Regression test for the real bug this was built to fix: a source format that
+    # never carries live-service fields (discount %, peak concurrent users) - e.g.
+    # a static Kaggle "steam.csv" export - used to have every single row treated as
+    # incomplete and deleted, even though every OTHER field was correctly mapped.
+    _insert_complete_game(conn, "companion-good")
+
+    conn.execute(
+        """
+        INSERT INTO dim_game (app_id, game_name, required_age, release_date,
+            estimated_owners, owners_min, owners_max)
+        VALUES ('no-live-fields', 'Game', 0, '2020-01-01', '0-20000', 0, 20000)
+        """
+    )
+    game_sk = conn.execute("SELECT game_sk FROM dim_game WHERE app_id = 'no-live-fields'").fetchone()[0]
+    conn.execute("INSERT OR IGNORE INTO dim_genre (genre_name) VALUES ('Action')")
+    genre_sk = conn.execute("SELECT genre_sk FROM dim_genre WHERE genre_name = 'Action'").fetchone()[0]
+    conn.execute("INSERT INTO bridge_game_genre (game_sk, genre_sk) VALUES (?, ?)", (game_sk, genre_sk))
+    conn.execute(
+        """
+        INSERT INTO fact_game (game_sk, date_sk, platform_sk, price_usd, discount_pct,
+            peak_ccu, positive_reviews, negative_reviews, average_playtime_mins)
+        VALUES (?, 20200315, 1, 9.99, NULL, NULL, 10, 1, 60)
+        """,
+        (game_sk,),
+    )
+    conn.commit()
+
+    removed = db.remove_incomplete_games(conn)
+
+    assert removed == {"fact_game": 0, "bridge_game_genre": 0, "dim_game": 0}
+    assert conn.execute("SELECT COUNT(*) FROM dim_game").fetchone()[0] == 2
+
+
+def test_remove_incomplete_games_skips_cleanup_if_it_would_delete_everything(conn):
+    # No companion good row this time - every fact_game row in the warehouse is
+    # missing price_usd, so a naive cleanup would wipe the entire (otherwise
+    # successful) import. The skip-guard should refuse to do that.
+    for app_id in ("bad-1", "bad-2"):
+        conn.execute(
+            """
+            INSERT INTO dim_game (app_id, game_name, required_age, release_date,
+                estimated_owners, owners_min, owners_max)
+            VALUES (?, 'Game', 0, '2020-01-01', '0-20000', 0, 20000)
+            """,
+            (app_id,),
+        )
+        game_sk = conn.execute("SELECT game_sk FROM dim_game WHERE app_id = ?", (app_id,)).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO fact_game (game_sk, date_sk, platform_sk, price_usd, discount_pct,
+                peak_ccu, positive_reviews, negative_reviews, average_playtime_mins)
+            VALUES (?, 20200315, 1, NULL, 0, 100, 10, 1, 60)
+            """,
+            (game_sk,),
+        )
+    conn.commit()
+
+    removed = db.remove_incomplete_games(conn)
+
+    assert removed["skipped_all_incomplete"] is True
+    assert removed["fact_game"] == 0
+    # Nothing was actually deleted - the whole point of the guard.
+    assert conn.execute("SELECT COUNT(*) FROM fact_game").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM dim_game").fetchone()[0] == 2
+
+
+def test_remove_incomplete_games_guard_does_not_trigger_on_an_empty_warehouse(conn):
+    # total_before == 0 must not be treated as "100% would be deleted" - there's
+    # nothing to skip cleaning up.
+    removed = db.remove_incomplete_games(conn)
+    assert "skipped_all_incomplete" not in removed
 
 
 def test_clear_data_wipes_user_tables_but_keeps_seeded_dimensions(conn):

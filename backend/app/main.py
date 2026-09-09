@@ -210,7 +210,14 @@ def _run_etl_job(job_id: str, file_id: str, meta: dict) -> None:
             try:
                 report_step("Removing games with any missing field...")
                 removed = db.remove_incomplete_games(conn)
-                if any(removed.values()):
+                if removed.get("skipped_all_incomplete"):
+                    logger.warning(
+                        "Job %s: completeness cleanup skipped (would have removed every row)",
+                        job_id,
+                    )
+                    if outcome.get("result"):
+                        outcome["result"]["incomplete_cleanup_skipped"] = True
+                elif any(removed.values()):
                     logger.info("Removed incomplete games after job %s: %s", job_id, removed)
                     if outcome.get("result"):
                         outcome["result"]["removed_incomplete"] = removed["dim_game"]

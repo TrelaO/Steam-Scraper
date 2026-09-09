@@ -288,11 +288,16 @@ _INCOMPLETE_FACT_CHECK = """
     OR dg.required_age IS NULL OR dg.estimated_owners IS NULL
     OR dg.owners_min IS NULL OR dg.owners_max IS NULL
     OR f.platform_sk IS NULL OR f.price_usd IS NULL
-    OR f.discount_pct IS NULL OR f.peak_ccu IS NULL
     OR f.positive_reviews IS NULL OR f.negative_reviews IS NULL
     OR f.average_playtime_mins IS NULL
     OR NOT EXISTS (SELECT 1 FROM bridge_game_genre bg WHERE bg.game_sk = dg.game_sk)
 """
+# discount_pct and peak_ccu are deliberately NOT in the check above: unlike the
+# other fields, they're live-service data (current sale %, current concurrent
+# players) that plenty of legitimate static Steam dataset exports never carry at
+# all - a dataset without a "peak_ccu" column isn't incomplete, it's just a
+# different kind of export. Requiring them here used to mean any such dataset had
+# every single row deleted after import (100% of an otherwise-successful run).
 
 
 def remove_incomplete_games(conn: sqlite3.Connection) -> dict:
@@ -304,6 +309,29 @@ def remove_incomplete_games(conn: sqlite3.Connection) -> dict:
     than an LLM-prompt instruction - this policy should apply the same way every
     time, not depend on the generated code remembering to implement it.
     """
+    total_before = conn.execute("SELECT COUNT(*) FROM fact_game").fetchone()[0]
+    would_delete = conn.execute(f"""
+        SELECT COUNT(*)
+        FROM fact_game f
+        JOIN dim_game dg ON dg.game_sk = f.game_sk
+        WHERE {_INCOMPLETE_FACT_CHECK}
+    """).fetchone()[0]
+
+    if total_before > 0 and would_delete == total_before:
+        # Every row from this import would be deleted - virtually always a sign
+        # that this source format structurally lacks some field the check requires
+        # (see the discount_pct/peak_ccu case above), not that the import is
+        # genuinely all bad data. Silently discarding an entire successful import
+        # is worse than leaving it with some NULLs, so skip the cleanup instead.
+        logger.warning(
+            "remove_incomplete_games would delete ALL %d fact_game row(s) - "
+            "skipping the cleanup instead of wiping the whole import. This usually "
+            "means this source format doesn't populate a field _INCOMPLETE_FACT_CHECK "
+            "requires, not that the data is actually bad.",
+            total_before,
+        )
+        return {"fact_game": 0, "bridge_game_genre": 0, "dim_game": 0, "skipped_all_incomplete": True}
+
     with conn:
         deleted_facts = conn.execute(f"""
             DELETE FROM fact_game
