@@ -74,6 +74,7 @@ function FormatComparisonCard() {
 
 export default function Upload() {
   const { uploaded, setUploaded, busy, setBusy, error, setError } = useUploadState();
+  const [isDragging, setIsDragging] = useState(false);
   const navigate = useNavigate();
 
   async function handleFile(file: File) {
@@ -114,9 +115,23 @@ export default function Upload() {
       </div>
 
       <div className="card">
-        <label className={`dropzone${busy ? " disabled" : ""}`}>
+        <label
+          className={`dropzone${busy ? " disabled" : ""}`}
+          style={isDragging ? { borderColor: "var(--accent)", background: "var(--surface)" } : undefined}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!busy) setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDragging(false);
+            const file = e.dataTransfer.files?.[0];
+            if (file && !busy) handleFile(file);
+          }}
+        >
           <span className="dropzone-title">
-            {busy ? "Working..." : "Click to choose a file"}
+            {busy ? "Working..." : "Click to choose a file, or drag one here"}
           </span>
           <span className="dropzone-hint">
             Any file type accepted — only csv, json, and xlsx can actually be processed

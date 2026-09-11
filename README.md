@@ -1,5 +1,9 @@
 # Steam Scraper
 
+> English usage guide: [USAGE.md](USAGE.md) — a from-scratch walkthrough (setup, all three
+> pages, troubleshooting) for anyone not reading Polish. This README stays in Polish since
+> it documents the project for its course context.
+
 Mini-hurtownia danych Steam z autogeneracją kodu ETL przez LLM (Gemini). System przyjmuje
 ten sam zbiór danych Steam w trzech formatach (CSV, JSON, XLSX), wykrywa format i za każdym
 razem zleca modelowi wygenerowanie kodu mapującego dane na wspólny model gwiazdy, aby
@@ -120,6 +124,13 @@ Endpointy (wszystkie pod `/api`):
 - `GET /api/schema` — metadane schematu gwiazdy (kolumny, klucze, liczba wierszy na żywo)
 - `POST /api/sql/query` — konsola SQL tylko do odczytu (SELECT/WITH/EXPLAIN), limit
   500 wierszy i 20s na zapytanie — patrz [backend/app/sql_console.py](backend/app/sql_console.py)
+- `DELETE /api/warehouse` — czyści dane hurtowni (dim_game/dim_genre/bridge_game_genre/
+  fact_game), zostawia wymiary referencyjne (dim_date/dim_platform)
+- `GET /api/gemini-usage` — dzienny licznik wywołań Gemini vs. `GEMINI_DAILY_CALL_BUDGET`
+- `GET/POST/DELETE /api/settings/api-key` — klucz API do LLM ustawiany w aplikacji
+  (⚙ Settings) ma priorytet nad `GEMINI_API_KEY` z `.env`, bez restartu kontenera —
+  patrz [backend/app/api_key_store.py](backend/app/api_key_store.py); GET nigdy nie
+  zwraca surowego klucza, tylko źródło (`override`/`env`/`none`) i zamaskowany podgląd
 
 ### Frontend (React + Vite + TS)
 
@@ -134,11 +145,13 @@ npm run dev
 Dev server na `:5173` proxuje `/api` do backendu na `:8000` (patrz
 [frontend/vite.config.ts](frontend/vite.config.ts)) — backend musi wtedy działać osobno.
 
-Strony: `Upload` (drag&drop + wykryty format), `PipelineRun` (wygenerowany kod + logi
-wykonania + podsumowanie mapowania pól od LLM), `Dashboard` (KPI, sygnały DSS, trend
-cen po roczniku, tabela z zawartością hurtowni — filtrowanie i sortowanie po
-kolumnach), `Warehouse` (diagram schematu gwiazdy z liczbą wierszy na żywo + konsola
-SQL tylko do odczytu z presetami, historią i eksportem CSV).
+Strony: `Upload` (drag&drop + wykryty format + porównanie formatów z dotychczasowych
+uruchomień), `PipelineRun` (wygenerowany kod + logi wykonania + podsumowanie mapowania
+pól od LLM), `Dashboard` (KPI, sygnały DSS, trend cen po roczniku, tabela z zawartością
+hurtowni — filtrowanie i sortowanie po kolumnach), `Warehouse` (diagram schematu
+gwiazdy z liczbą wierszy na żywo + konsola SQL tylko do odczytu z presetami, historią
+i eksportem CSV). W pasku nawigacji dodatkowo ⚙ Settings (klucz API do LLM) i przełącznik
+trybu ciemnego.
 
 ## Dane wejściowe
 
@@ -169,6 +182,14 @@ nic realnie nie przerywa) została też znaleziona i naprawiona w konsoli SQL
 Pliki źródłowe wgrywa się przez `/upload`; nie są commitowane (`backend/landing/`
 zignorowane w git). Wygenerowany kod ETL per format w `backend/generated_etl/` JEST
 commitowany jako artefakt badawczy do porównania między formatami.
+
+**Czyszczenie niekompletnych wierszy.** Po udanym uruchomieniu ETL backend usuwa gry,
+którym brakuje któregoś zmapowanego pola (`remove_incomplete_games` w
+[backend/app/db.py](backend/app/db.py)) — to NIE dotyczy `discount_pct`/`peak_ccu`
+(pola live-service, których część statycznych eksportów Steam po prostu nigdy nie ma).
+Jeśli ta reguła usunęłaby 100% właśnie zaimportowanych wierszy, czyszczenie jest
+pomijane zamiast po cichu kasować cały import — to był realny bug znaleziony i
+naprawiony w trakcie tego projektu (zobacz `skipped_all_incomplete` w wyniku joba).
 
 ## Testy
 
