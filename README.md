@@ -164,12 +164,15 @@ Pobierz zbiór ręcznie z [kaggle.com/datasets/fronkongames/steam-games-dataset]
 i wgraj `games.csv` / `games.json` przez stronę Upload w aplikacji — każdy osobno,
 żeby porównać jak LLM radzi sobie z każdym formatem.
 
-**Uwaga na rozmiar.** Pełny zbiór to ~400 MB (CSV) / ~930 MB (JSON), ~100k+ gier.
-Wygenerowany kod wykonuje się w osobnym procesie (nie wątku — patrz niżej) z limitem
-90s (`EXEC_TIMEOUT_SECONDS` w [backend/app/etl_runner.py](backend/app/etl_runner.py)),
-a kod od LLM prawie zawsze iteruje wiersz po wierszu — przy dużej skali każda próba
-może skończyć się timeoutem, paląc dzienny limit zapytań do Gemini bez żadnego efektu.
-Do testów pipeline'u wytnij najpierw mniejszą próbkę wierszy (np.
+**Uwaga na rozmiar.** Pełny zbiór to ~400 MB (CSV) / ~930 MB (JSON), realnie
+zweryfikowane ~139k gier w wariancie JSON. Wygenerowany kod wykonuje się w osobnym
+procesie (nie wątku — patrz niżej) z limitem 240s (`EXEC_TIMEOUT_SECONDS` w
+[backend/app/etl_runner.py](backend/app/etl_runner.py)), a kod od LLM nawet przy
+grupowaniu zapisów (`executemany`) zwykle robi kilka przebiegów w czystym Pythonie
+po każdym wierszu żeby sparsować/znormalizować wartości - to te przebiegi, nie same
+zapisy do bazy, dominują czas przy takiej skali. Przy pełnym pliku każda próba może
+mimo to skończyć się timeoutem, paląc dzienny limit zapytań do Gemini bez żadnego
+efektu. Do testów pipeline'u wytnij najpierw mniejszą próbkę wierszy (np.
 `head -300 games.csv > games_sample.csv` w PowerShell/bash, lub `df.head(300)` w
 pandas) i wgrywaj tę próbkę zamiast pełnego pliku.
 
@@ -178,6 +181,23 @@ przekroczenie limitu czasu faktycznie zabija proces (`process.terminate()`/`kill
 zamiast zostawiać go działającym w tle. Ta sama klasa problemu (wątek + timeout, który
 nic realnie nie przerywa) została też znaleziona i naprawiona w konsoli SQL
 ([backend/app/sql_console.py](backend/app/sql_console.py), przez `conn.interrupt()`).
+
+**Timeout != błąd logiczny.** Zaobserwowane na realnym przebiegu (pełny plik
+`games.json`, ~930 MB, ~139k gier): 3 próby pod rząd zakończyły się timeoutem, mimo
+że za każdym razem LLM generował inny, sensowny kod — bo domyślny prompt retry
+("napraw błąd") nie mówi modelowi, że problem jest w podejściu (pętla Python
+wiersz-po-wierszu), nie w konkretnym buggu. Gdy poprzedni błąd to `TimeoutError`,
+prompt retry jawnie prosi o wektoryzację i grupowanie zapisów (`executemany`
+zamiast pojedynczych `execute()` na wiersz) zamiast ogólnego "napraw błąd" — patrz
+`_build_prompt` w [backend/app/llm_etl_generator.py](backend/app/llm_etl_generator.py).
+Zweryfikowane na kolejnym realnym przebiegu tego samego ~139k-wierszowego pliku: kod
+po tej poprawce faktycznie grupował WSZYSTKIE zapisy do bazy przez `executemany`
+(widoczna poprawa) i mimo to nadal przekroczył limit - bo parsowanie/normalizacja
+wartości w czystym Pythonie (kilka przebiegów po wszystkich wierszach, zanim
+jakikolwiek zapis się wykona) zostaje głównym kosztem, nie same zapisy. Stąd
+podniesienie `EXEC_TIMEOUT_SECONDS` do 240s (patrz wyżej) - bezpieczne, bo
+przekroczenie limitu faktycznie zabija proces, nie zostawia go działającym w tle.
+Sampling wierszy (patrz wyżej) zostaje mimo to zalecany dla najszybszych testów.
 
 Pliki źródłowe wgrywa się przez `/upload`; nie są commitowane (`backend/landing/`
 zignorowane w git). Wygenerowany kod ETL per format w `backend/generated_etl/` JEST
@@ -204,11 +224,12 @@ Pokrywają deterministyczne części niezależne od LLM/klucza API: wykrywanie f
 konsoli SQL tylko-do-odczytu i jej faktyczne działanie timeoutu
 ([backend/app/sql_console.py](backend/app/sql_console.py)), DDL/migrację schematu
 i regułę usuwania niekompletnych gier ([backend/app/db.py](backend/app/db.py)),
-reguły DSS ([backend/app/analytics_queries.py](backend/app/analytics_queries.py))
-oraz agregację porównania formatów
-([backend/app/pipeline_stats.py](backend/app/pipeline_stats.py)). Nie wymagają
-`GEMINI_API_KEY` ani sieci — `backend/app/llm_etl_generator.py` (właściwe wywołania
-Gemini) celowo zostaje poza zakresem testów jednostkowych.
+reguły DSS ([backend/app/analytics_queries.py](backend/app/analytics_queries.py)),
+agregację porównania formatów ([backend/app/pipeline_stats.py](backend/app/pipeline_stats.py))
+oraz budowę promptu retry (w tym gałąź specjalnie dla timeoutu - patrz niżej) w
+[backend/app/llm_etl_generator.py](backend/app/llm_etl_generator.py). Nie wymagają
+`GEMINI_API_KEY` ani sieci — same wywołania Gemini (`generate_content`) celowo
+zostają poza zakresem testów jednostkowych.
 
 ## Otwarte pytania
 

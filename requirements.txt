@@ -5,6 +5,10 @@ python-dotenv>=1.0
 pandas>=2.2
 openpyxl>=3.1
 google-genai>=0.3
+# Already installed transitively via google-genai, but imported directly now (to
+# catch httpx.TimeoutException around the Gemini HTTP call) - pinned explicitly
+# rather than relying on it staying a transitive dependency.
+httpx>=0.28
 python-multipart>=0.0.9
 
 # Tests only (backend/tests/) - not needed to run the app itself

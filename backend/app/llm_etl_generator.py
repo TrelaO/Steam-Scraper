@@ -4,14 +4,23 @@ import os
 import re
 import time
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from . import api_key_store, quota_guard
 
 logger = logging.getLogger("steam_etl.llm_etl_generator")
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
+# The execution side (etl_runner._execute_once) is bounded and genuinely enforced
+# (subprocess kill) - but the Gemini API call itself had no timeout at all: a hung
+# request would block a job indefinitely with no recovery, unlike everything else in
+# this pipeline. HttpOptions.timeout is in milliseconds; generous enough that a
+# normal (if slow) generation isn't cut off, but not unbounded.
+GEMINI_HTTP_TIMEOUT_SECONDS = 120
 
 # Google's 429 responses can include a RetryInfo.retryDelay hint (a few seconds to
 # ~1min for a short-window rate limit). If it's under this, wait it out and retry the
@@ -32,6 +41,14 @@ class MissingApiKeyError(RuntimeError):
     .env's GEMINI_API_KEY."""
 
 
+class GenerationTimeoutError(RuntimeError):
+    """Raised when the Gemini API call itself doesn't respond within
+    GEMINI_HTTP_TIMEOUT_SECONDS. Distinct from etl_runner's EXEC_TIMEOUT_SECONDS,
+    which bounds running the GENERATED code - this bounds the network call that
+    asks Gemini to write it in the first place, which previously had no timeout at
+    all (a hung request could block a job indefinitely with no recovery)."""
+
+
 def _get_client() -> genai.Client:
     api_key = api_key_store.get_api_key()
     if not api_key:
@@ -39,7 +56,10 @@ def _get_client() -> genai.Client:
             "No API key configured - set one in the app (⚙ Settings) or as "
             "GEMINI_API_KEY in .env."
         )
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=genai_types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_SECONDS * 1000),
+    )
 
 
 SYSTEM_PROMPT = """You are a data engineer writing a Python ETL transformation.
@@ -89,6 +109,7 @@ def _build_prompt(
     sample: str,
     previous_code: str | None = None,
     previous_error: str | None = None,
+    previous_error_was_timeout: bool = False,
 ) -> str:
     parts = [
         SYSTEM_PROMPT,
@@ -96,7 +117,32 @@ def _build_prompt(
         f"\nTarget schema DDL:\n{ddl}\n",
         f"\nSample of the source data (CSV-rendered, first rows):\n{sample}\n",
     ]
-    if previous_code and previous_error:
+    if previous_code and previous_error and previous_error_was_timeout:
+        # A timeout isn't a logic bug the "fix the bug" framing below applies to -
+        # observed in practice (see backend/tests, and a real 927MB run that timed
+        # out 3 times in a row on 3 DIFFERENT but all row-by-row-loop attempts):
+        # without this, "fix the bug" reliably produces another similarly-shaped
+        # per-row Python loop that also times out, burning retries for nothing.
+        parts.append(
+            "\nThe previous attempt did NOT raise a logic error - it simply did not "
+            "finish within the execution time limit. This means the approach itself "
+            "is too slow at scale, most likely because it iterates over rows one at "
+            "a time in a pure Python loop (e.g. `for _, row in df.iterrows()` or "
+            "similar), including for the SQL writes. Rewrite the function to avoid "
+            "a per-row Python loop wherever possible:\n"
+            "- Prefer vectorized pandas/numpy operations (column-wise transforms) "
+            "over iterating rows to compute values.\n"
+            "- Batch every database write: build lists of tuples first, then use a "
+            "SINGLE executemany() call per table, not one execute() per row.\n"
+            "- If a lookup (e.g. mapping platform flags to platform_sk) is needed "
+            "per row, precompute it as a dict/Series lookup instead of a query per "
+            "row.\n"
+            "Do not just resubmit a similarly-structured attempt - the algorithmic "
+            "complexity of the previous approach is the actual problem, not a typo "
+            "or an edge case.\n\nPrevious code:\n"
+            f"{previous_code}\n\nError raised:\n{previous_error}\n"
+        )
+    elif previous_code and previous_error:
         parts.append(
             "\nA previous attempt raised an error. Fix the bug and return the corrected "
             "full function.\n\nPrevious code:\n"
@@ -177,15 +223,25 @@ def generate_etl_code(
     sample: str,
     previous_code: str | None = None,
     previous_error: str | None = None,
+    previous_error_was_timeout: bool = False,
 ) -> str:
     quota_guard.check_and_reserve()
 
     client = _get_client()
-    prompt = _build_prompt(file_format, ddl, sample, previous_code, previous_error)
+    prompt = _build_prompt(
+        file_format, ddl, sample, previous_code, previous_error, previous_error_was_timeout
+    )
     logger.info("Calling Gemini model=%s (prompt=%d chars)...", MODEL_NAME, len(prompt))
     started = time.monotonic()
     try:
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+    except httpx.TimeoutException as exc:
+        logger.warning("Gemini API call timed out after %ds", GEMINI_HTTP_TIMEOUT_SECONDS)
+        raise GenerationTimeoutError(
+            f"Gemini did not respond within {GEMINI_HTTP_TIMEOUT_SECONDS}s - likely a "
+            "network/connectivity issue talking to Google's API, not a problem with the "
+            "prompt or the data. Try again."
+        ) from exc
     except genai_errors.APIError as exc:
         if exc.code == 429 or exc.status == "RESOURCE_EXHAUSTED":
             retry_delay = _extract_retry_delay_seconds(exc)
@@ -204,6 +260,12 @@ def generate_etl_code(
                     return _extract_code(response.text)
                 except genai_errors.APIError as retry_exc:
                     exc = retry_exc
+                except httpx.TimeoutException as timeout_exc:
+                    raise GenerationTimeoutError(
+                        f"Gemini did not respond within {GEMINI_HTTP_TIMEOUT_SECONDS}s "
+                        "(after a rate-limit retry) - likely a network/connectivity "
+                        "issue, not a problem with the prompt or the data. Try again."
+                    ) from timeout_exc
             logger.warning("Gemini quota/rate limit hit: %s", exc.message)
             raise QuotaExceededError(
                 f"Gemini API quota exceeded for model '{MODEL_NAME}': {exc.message} "

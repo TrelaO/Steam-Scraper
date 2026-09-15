@@ -13,10 +13,15 @@ from . import llm_etl_generator
 logger = logging.getLogger("steam_etl.etl_runner")
 
 MAX_ATTEMPTS = 3
-# 30s repeatedly proved too tight against a real ~139k-row dataset even for otherwise-
-# correct generated code (a plain Python loop over that many rows adds up); 90s gives
-# real headroom while still bounding a truly broken/infinite-loop generation attempt.
-EXEC_TIMEOUT_SECONDS = 90
+# 30s, then 90s, both repeatedly proved too tight against a real ~139k-row dataset -
+# even generated code that correctly batches every DB write via executemany() (see
+# the timeout-specific retry prompt in llm_etl_generator._build_prompt) still does
+# several pure-Python passes over every row to parse/normalize values first, and
+# that parsing - not the DB writes - is what actually dominates at this scale. Safe
+# to be generous here: unlike a thread-based timeout, a subprocess that runs past
+# this limit is genuinely killed (process.terminate()/kill() in _execute_once), not
+# just abandoned - a longer bound doesn't risk anything hanging around.
+EXEC_TIMEOUT_SECONDS = 240
 
 # Generated ETL code may only import these modules. Keeps the sandbox from reaching
 # out to the filesystem/network/subprocess even though exec() itself can't be fully sealed.
@@ -222,7 +227,8 @@ def run_etl_with_retries(
                 return {"status": "failed", "code": code, "logs": logs, "error": error_text}
             step(f"Requesting corrected code from Gemini for attempt {attempt + 1}...")
             code = llm_etl_generator.generate_etl_code(
-                file_format, ddl, sample, previous_code=code, previous_error=error_text
+                file_format, ddl, sample, previous_code=code, previous_error=error_text,
+                previous_error_was_timeout=isinstance(exc, TimeoutError),
             )
 
     return {"status": "failed", "code": code, "logs": logs}
